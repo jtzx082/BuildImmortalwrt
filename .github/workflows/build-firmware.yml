@@ -41,31 +41,36 @@ jobs:
       run: |
         mkdir -p $IMAGEBUILDER_DIR/packages/custom
         if [ -d "$SOFTS_DIR" ]; then
-          find "$SOFTS_DIR" -maxdepth 1 -type f -name '*.ipk' -exec cp {} "$IMAGEBUILDER_DIR/packages/custom/" \;
+          # 拷贝所有ipk到自定义目录
+          find "$SOFTS_DIR" -maxdepth 1 -type f -name "*.ipk" -exec cp {} "$IMAGEBUILDER_DIR/packages/custom/" \;
         fi
 
-    - name: Parse plugins.list to get package names
-      id: plugins
+    - name: Parse plugins.list and custom ipk to get package names
+      id: get_packages
       run: |
+        # 解析 plugins.list
+        PKGS=""
         if [ -f "$PLUGINS_FILE" ]; then
-          PKGS=$(grep -vE '^\s*#|^\s*$' $PLUGINS_FILE | tr '\n' ' ')
-          echo "PKGS=${PKGS}" >> "$GITHUB_ENV"
-        else
-          echo "No plugins.list file found!"
-          exit 1
+          PKGS=$(grep -vE '^\s*#|^\s*$' "$PLUGINS_FILE" | xargs)
         fi
+
+        # 解析 custom 目录下所有ipk包名，并加入到自定义包字符串
+        CUSTOM_PKGS=""
+        if [ -d "$IMAGEBUILDER_DIR/packages/custom" ]; then
+          for ipk in "$IMAGEBUILDER_DIR/packages/custom/"*.ipk; do
+            [ -e "$ipk" ] || continue
+            pkgname=$(basename "$ipk" | awk -F_ '{print $1}')
+            CUSTOM_PKGS="$CUSTOM_PKGS $pkgname"
+          done
+        fi
+
+        # 导出环境变量
+        echo "PKGS=$PKGS" >> $GITHUB_ENV
+        echo "CUSTOM_PKGS=$CUSTOM_PKGS" >> $GITHUB_ENV
 
     - name: Build firmware
       run: |
         cd $IMAGEBUILDER_DIR
-        # 自动查找 custom/*.ipk，拼接包名字符串
-        CUSTOM_PKGS=""
-        for ipk in packages/custom/*.ipk; do
-          [ -e "$ipk" ] || continue
-          pkgname=$(basename "$ipk" | sed 's/_.*//')
-          CUSTOM_PKGS="$CUSTOM_PKGS $pkgname"
-        done
-
         make image \
           EXTRA_PACKAGES="$CUSTOM_PKGS $PKGS" \
           FILES=../files \
