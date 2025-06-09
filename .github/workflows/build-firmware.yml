@@ -1,76 +1,79 @@
-name: Build ImmortalWRT Firmware
+name: Build ImmortalWrt Firmware
 
 on:
-  workflow_dispatch:  # 允许手动触发
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    env:
+      IMAGEBUILDER_URL: "https://downloads.immortalwrt.org/releases/24.10.1/targets/x86/64/immortalwrt-imagebuilder-24.10.1-x86-64.Linux-x86_64.tar.zst"
+      IMAGEBUILDER_ARCHIVE: "immortalwrt-imagebuilder-24.10.1-x86-64.Linux-x86_64.tar.zst"
+      IMAGEBUILDER_DIR: "immortalwrt-imagebuilder-24.10.1-x86-64.Linux-x86_64"
+      SOFTS_DIR: "softs"
+      PLUGINS_FILE: "plugins.list"
+      OUTPUT_DIR: "output"
 
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
 
-    - name: Set up environment
+    - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y zstd build-essential libncurses-dev git gawk unzip
+        sudo apt-get install -y build-essential libncurses5-dev zstd
 
-    - name: Download and extract ImageBuilder
+    - name: Download ImmortalWrt ImageBuilder
       run: |
-        curl -LO https://downloads.immortalwrt.org/releases/24.10.1/targets/x86/64/immortalwrt-imagebuilder-24.10.1-x86-64.Linux-x86_64.tar.zst
-        tar -I zstd -xf immortalwrt-imagebuilder-*.tar.zst
-        rm immortalwrt-imagebuilder-*.tar.zst
-        mv immortalwrt-imagebuilder-* imagebuilder
+        wget $IMAGEBUILDER_URL
+        tar -I zstd -xf $IMAGEBUILDER_ARCHIVE
 
-    - name: Apply custom configuration
+    - name: Prepare custom IPK packages
       run: |
-        # 复制自定义配置到ImageBuilder
-        [ -f .config ] && cp .config imagebuilder/
-        [ -f feeds.conf.default ] && cp feeds.conf.default imagebuilder/
-        
-        # 对于ImmortalWRT ImageBuilder，不需要运行make defconfig
-        # 直接准备构建环境
-        cd imagebuilder
-        mkdir -p custom-files/etc
-        
-        # 如果存在feeds.conf.default，则更新feeds
-        if [ -f feeds.conf.default ]; then
-            cp feeds.conf.default .
-            ./scripts/feeds update -a
-            ./scripts/feeds install -a
+        mkdir -p $IMAGEBUILDER_DIR/packages/custom
+        if [ -d "$SOFTS_DIR" ]; then
+          cp $SOFTS_DIR/*.ipk $IMAGEBUILDER_DIR/packages/custom/ || true
+        fi
+
+    - name: Parse plugins.list to get package names
+      id: plugins
+      run: |
+        if [ -f "$PLUGINS_FILE" ]; then
+          PKGS=$(grep -vE '^\s*#|^\s*$' $PLUGINS_FILE | tr '\n' ' ')
+          echo "PKGS=${PKGS}" >> "$GITHUB_ENV"
+        else
+          echo "No plugins.list file found!"
+          exit 1
         fi
 
     - name: Build firmware
       run: |
-        cd imagebuilder
-        # 使用PROFILE参数指定目标设备
-        make image PROFILE="generic" \
-            PACKAGES="$(grep '^CONFIG_PACKAGE' .config | \
-                       sed 's/^CONFIG_PACKAGE_//;s/=y//;s/^"//;s/"$//' | \
-                       tr 'A-Z' 'a-z' | tr '\n' ' ')" \
-            FILES="custom-files"
+        cd $IMAGEBUILDER_DIR
+        make image \
+          EXTRA_PACKAGES="custom/*.ipk $PKGS" \
+          FILES=../files \
+          -j$(nproc)
+        mkdir -p ../$OUTPUT_DIR
+        cp -r bin/targets/x86/64/* ../$OUTPUT_DIR/
 
-    - name: Upload artifacts to workflow
+    - name: Upload firmware to Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: firmware-binaries
-        path: imagebuilder/bin/targets/*/*/
-        retention-days: 7
+        name: immortalwrt-x86-64
+        path: ${{ env.OUTPUT_DIR }}
 
-    - name: Create release and upload assets
-      if: success() && github.event_name == 'workflow_dispatch'
+    - name: Generate release tag
+      id: release_tag
+      run: |
+        echo "tag=auto-build-$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
+
+    - name: Create GitHub Release
       uses: softprops/action-gh-release@v2
       with:
-        name: "Firmware Build ${{ github.run_number }}"
-        tag_name: "firmware-${{ github.run_id }}"
-        body: "Automatically built ImmortalWRT firmware"
-        draft: false
-        prerelease: false
-        files: |
-          imagebuilder/bin/targets/*/*/*.bin
-          imagebuilder/bin/targets/*/*/*.gz
-          imagebuilder/bin/targets/*/*/*.manifest
+        tag_name: ${{ steps.release_tag.outputs.tag }}
+        name: "ImmortalWrt x86_64 Firmware ${{ steps.release_tag.outputs.tag }}"
+        body: |
+          This is an automated build of ImmortalWrt x86_64 firmware.
+        files: ${{ env.OUTPUT_DIR }}/*
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
