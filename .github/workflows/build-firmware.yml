@@ -1,0 +1,68 @@
+name: Build ImmortalWRT Firmware
+
+on:
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60  # 根据编译需求调整超时时间
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # 获取所有历史记录（用于版本标签）
+
+    - name: Set up environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y zstd build-essential libncurses-dev
+
+    - name: Download and extract ImageBuilder
+      run: |
+        curl -LO https://downloads.immortalwrt.org/releases/24.10.1/targets/x86/64/immortalwrt-imagebuilder-24.10.1-x86-64.Linux-x86_64.tar.zst
+        tar -I zstd -xf immortalwrt-imagebuilder-*.tar.zst
+        rm immortalwrt-imagebuilder-*.tar.zst
+        mv immortalwrt-imagebuilder-* imagebuilder
+
+    - name: Apply custom configuration
+      run: |
+        cp .config imagebuilder/
+        cp feeds.conf.default imagebuilder/
+        cd imagebuilder
+        make defconfig  # 应用配置文件
+
+    - name: Build firmware
+      run: |
+        cd imagebuilder
+        make -j$(nproc)  # 使用所有可用核心编译
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: firmware-binaries
+        path: imagebuilder/bin/targets/*/*/
+
+    - name: Create release
+      id: create_release
+      uses: actions/create-release@v1
+      if: success() && github.event_name == 'workflow_dispatch'
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: firmware-${{ github.run_id }}
+        release_name: Firmware Build ${{ github.run_id }}
+        draft: false
+        prerelease: false
+
+    - name: Upload release assets
+      uses: actions/upload-release-asset@v1
+      if: success() && github.event_name == 'workflow_dispatch'
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: imagebuilder/bin/targets/*/*/*.bin
+        asset_name: immortalwrt-custom-firmware.bin
+        asset_content_type: application/octet-stream
