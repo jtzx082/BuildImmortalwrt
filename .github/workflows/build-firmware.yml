@@ -22,15 +22,14 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt update -y
-        sudo apt full-upgrade -y
         sudo apt install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
-        bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext gcc-multilib \
-        g++-multilib git gnutls-dev gperf haveged help2man intltool lib32gcc-s1 libc6-dev-i386 libelf-dev \
-        libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses-dev libpython3-dev \
-        libreadline-dev libssl-dev libtool libyaml-dev libz-dev lld llvm lrzsz mkisofs msmtp nano \
-        ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip python3-ply python3-docutils \
-        python3-pyelftools qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo uglifyjs \
-        upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
+          bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext gcc-multilib \
+          g++-multilib git gnutls-dev gperf haveged help2man intltool lib32gcc-s1 libc6-dev-i386 libelf-dev \
+          libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses-dev libpython3-dev \
+          libreadline-dev libssl-dev libtool libyaml-dev libz-dev lld llvm lrzsz mkisofs msmtp nano \
+          ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip python3-ply python3-docutils \
+          python3-pyelftools qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo uglifyjs \
+          upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
 
     - name: Download ImmortalWrt ImageBuilder
       run: |
@@ -41,20 +40,19 @@ jobs:
       run: |
         mkdir -p $IMAGEBUILDER_DIR/packages/custom
         if [ -d "$SOFTS_DIR" ]; then
-          # 拷贝所有ipk到自定义目录
-          find "$SOFTS_DIR" -maxdepth 1 -type f -name "*.ipk" -exec cp {} "$IMAGEBUILDER_DIR/packages/custom/" \;
+          find "$SOFTS_DIR" -type f -name "*.ipk" -exec cp {} "$IMAGEBUILDER_DIR/packages/custom/" \;
         fi
 
-    - name: Parse plugins.list and custom ipk to get package names
-      id: get_packages
+    - name: Parse plugins.list and custom ipks to get package names
+      id: collect_pkgs
       run: |
-        # 解析 plugins.list
-        PKGS=""
+        # 解析插件列表
+        PLUGINS=""
         if [ -f "$PLUGINS_FILE" ]; then
-          PKGS=$(grep -vE '^\s*#|^\s*$' "$PLUGINS_FILE" | xargs)
+          PLUGINS=$(grep -vE '^\s*#|^\s*$' "$PLUGINS_FILE" | xargs)
         fi
 
-        # 解析 custom 目录下所有ipk包名，并加入到自定义包字符串
+        # 获取 custom 目录下所有ipk包名
         CUSTOM_PKGS=""
         if [ -d "$IMAGEBUILDER_DIR/packages/custom" ]; then
           for ipk in "$IMAGEBUILDER_DIR/packages/custom/"*.ipk; do
@@ -64,15 +62,14 @@ jobs:
           done
         fi
 
-        # 导出环境变量
-        echo "PKGS=$PKGS" >> $GITHUB_ENV
+        echo "PLUGINS=$PLUGINS" >> $GITHUB_ENV
         echo "CUSTOM_PKGS=$CUSTOM_PKGS" >> $GITHUB_ENV
 
     - name: Build firmware
       run: |
         cd $IMAGEBUILDER_DIR
         make image \
-          EXTRA_PACKAGES="$CUSTOM_PKGS $PKGS" \
+          EXTRA_PACKAGES="${CUSTOM_PKGS} ${PLUGINS}" \
           FILES=../files \
           IMAGE_SIZE="$IMAGE_SIZE" \
           -j$(nproc)
