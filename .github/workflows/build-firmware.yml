@@ -21,7 +21,7 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential libncurses5-dev zstd qemu-utils
+        sudo apt-get install -y build-essential libncurses5-dev zstd qemu-utils genisoimage
 
     - name: Download ImmortalWrt ImageBuilder
       run: |
