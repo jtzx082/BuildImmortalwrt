@@ -2,101 +2,90 @@ name: Build ImmortalWrt Firmware
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     env:
-      IMAGEBUILDER_URL: "https://downloads.immortalwrt.org/releases/24.10.1/targets/x86/64/immortalwrt-imagebuilder-24.10.1-x86-64.Linux-x86_64.tar.zst"
-      IMAGEBUILDER_ARCHIVE: "immortalwrt-imagebuilder-24.10.1-x86-64.Linux-x86_64.tar.zst"
-      IMAGEBUILDER_DIR: "immortalwrt-imagebuilder-24.10.1-x86-64.Linux-x86_64"
-      SOFTS_DIR: "softs"
-      PLUGINS_FILE: "plugins.list"
-      OUTPUT_DIR: "output"
-      IMAGE_SIZE: "1024MB"
+      IMAGEBUILDER_URL: https://downloads.immortalwrt.org/releases/24.10.1/targets/x86/64/immortalwrt-imagebuilder-24.10.1-x86-64.Linux-x86_64.tar.zst
+      IMAGEBUILDER_DIR: immortalwrt-imagebuilder-24.10.1-x86-64.Linux-x86_64
+      PLUGIN_LIST_FILE: plugins.list
+      IPK_DIR: softs
+      ROOTFS_PARTSIZE: 1024
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Install dependencies
-      run: |
-        sudo apt update -y
-        sudo apt full-upgrade -y
-        sudo apt install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
-        bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext gcc-multilib \
-        g++-multilib git gnutls-dev gperf haveged help2man intltool lib32gcc-s1 libc6-dev-i386 libelf-dev \
-        libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses-dev libpython3-dev \
-        libreadline-dev libssl-dev libtool libyaml-dev libz-dev lld llvm lrzsz mkisofs msmtp nano \
-        ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip python3-ply python3-docutils \
-        python3-pyelftools qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo uglifyjs \
-        upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libncurses5-dev gawk git subversion libssl-dev gettext unzip zlib1g-dev file wget zstd
 
-    - name: Download ImmortalWrt ImageBuilder
-      run: |
-        wget $IMAGEBUILDER_URL
-        tar -I zstd -xf $IMAGEBUILDER_ARCHIVE
+      - name: Download ImageBuilder
+        run: |
+          wget $IMAGEBUILDER_URL -O imagebuilder.tar.zst
 
-    - name: Prepare custom IPK packages
-      run: |
-        mkdir -p $IMAGEBUILDER_DIR/packages/custom
-        if [ -d "$SOFTS_DIR" ]; then
-          # 拷贝所有ipk到自定义目录
-          find "$SOFTS_DIR" -maxdepth 1 -type f -name "*.ipk" -exec cp {} "$IMAGEBUILDER_DIR/packages/custom/" \;
-        fi
+      - name: Extract ImageBuilder
+        run: |
+          tar --use-compress-program=unzstd -xvf imagebuilder.tar.zst
 
-    - name: Parse plugins.list and custom ipk to get package names
-      id: get_packages
-      run: |
-        # 解析 plugins.list
-        PKGS=""
-        if [ -f "$PLUGINS_FILE" ]; then
-          PKGS=$(grep -vE '^\s*#|^\s*$' "$PLUGINS_FILE" | xargs)
-        fi
+      - name: Prepare IPK packages
+        run: |
+          mkdir -p $IMAGEBUILDER_DIR/packages
+          if [ -d "$IPK_DIR" ]; then
+            cp $IPK_DIR/*.ipk $IMAGEBUILDER_DIR/packages/ || true
+          fi
 
-        # 解析 custom 目录下所有ipk包名，并加入到自定义包字符串
-        CUSTOM_PKGS=""
-        if [ -d "$IMAGEBUILDER_DIR/packages/custom" ]; then
-          for ipk in "$IMAGEBUILDER_DIR/packages/custom/"*.ipk; do
-            [ -e "$ipk" ] || continue
-            pkgname=$(basename "$ipk" | awk -F_ '{print $1}')
-            CUSTOM_PKGS="$CUSTOM_PKGS $pkgname"
-          done
-        fi
+      - name: Prepare files directory (optional)
+        run: |
+          mkdir -p $IMAGEBUILDER_DIR/files
 
-        # 导出环境变量
-        echo "PKGS=$PKGS" >> $GITHUB_ENV
-        echo "CUSTOM_PKGS=$CUSTOM_PKGS" >> $GITHUB_ENV
+      - name: Read plugin list
+        id: plugins
+        run: |
+          PLUGINS=$(tr '\n' ' ' < $PLUGIN_LIST_FILE)
+          echo "plugins=$PLUGINS" >> $GITHUB_OUTPUT
 
-    - name: Build firmware
-      run: |
-        cd $IMAGEBUILDER_DIR
-        make image \
-          EXTRA_PACKAGES="$CUSTOM_PKGS $PKGS" \
-          FILES=../files \
-          IMAGE_SIZE="$IMAGE_SIZE" \
-          -j$(nproc)
-        mkdir -p ../$OUTPUT_DIR
-        cp -r bin/targets/x86/64/* ../$OUTPUT_DIR/
+      - name: Build firmware
+        working-directory: ${{ env.IMAGEBUILDER_DIR }}
+        run: |
+          make update
+          echo "CONFIG_TARGET_ROOTFS_PARTSIZE=${ROOTFS_PARTSIZE}" >> .config
+          make image PROFILE=generic PACKAGES="${{ steps.plugins.outputs.plugins }}" FILES=files/
+          mkdir -p ../output
+          cp -r bin/targets/x86/64/* ../output/
 
-    - name: Upload firmware to Artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: immortalwrt-x86-64
-        path: ${{ env.OUTPUT_DIR }}
+      - name: Upload firmware as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: immortalwrt-firmware
+          path: output/
 
-    - name: Generate release tag
-      id: release_tag
-      run: |
-        echo "tag=auto-build-$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
+      - name: Generate release tag
+        id: tag
+        run: |
+          echo "tag=auto-$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
 
-    - name: Create GitHub Release
-      uses: softprops/action-gh-release@v2
-      with:
-        tag_name: ${{ steps.release_tag.outputs.tag }}
-        name: "ImmortalWrt x86_64 Firmware ${{ steps.release_tag.outputs.tag }}"
-        body: |
-          This is an automated build of ImmortalWrt x86_64 firmware.
-        files: ${{ env.OUTPUT_DIR }}/*
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ImmortalWrt Firmware - ${{ steps.tag.outputs.tag }}
+          body: |
+            Automated build for ImmortalWrt firmware.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload firmware to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ImmortalWrt Firmware - ${{ steps.tag.outputs.tag }}
+          files: output/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
