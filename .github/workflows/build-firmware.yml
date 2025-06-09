@@ -6,18 +6,18 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60  # 根据编译需求调整超时时间
+    timeout-minutes: 60
 
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
-        fetch-depth: 0  # 获取所有历史记录
+        fetch-depth: 0
 
     - name: Set up environment
       run: |
         sudo apt-get update
-        sudo apt-get install -y zstd build-essential libncurses-dev
+        sudo apt-get install -y zstd build-essential libncurses-dev git gawk unzip
 
     - name: Download and extract ImageBuilder
       run: |
@@ -28,15 +28,31 @@ jobs:
 
     - name: Apply custom configuration
       run: |
-        cp .config imagebuilder/
-        cp feeds.conf.default imagebuilder/
+        # 复制自定义配置到ImageBuilder
+        [ -f .config ] && cp .config imagebuilder/
+        [ -f feeds.conf.default ] && cp feeds.conf.default imagebuilder/
+        
+        # 对于ImmortalWRT ImageBuilder，不需要运行make defconfig
+        # 直接准备构建环境
         cd imagebuilder
-        make defconfig  # 应用配置文件
+        mkdir -p custom-files/etc
+        
+        # 如果存在feeds.conf.default，则更新feeds
+        if [ -f feeds.conf.default ]; then
+            cp feeds.conf.default .
+            ./scripts/feeds update -a
+            ./scripts/feeds install -a
+        fi
 
     - name: Build firmware
       run: |
         cd imagebuilder
-        make -j$(nproc)  # 使用所有可用核心编译
+        # 使用PROFILE参数指定目标设备
+        make image PROFILE="generic" \
+            PACKAGES="$(grep '^CONFIG_PACKAGE' .config | \
+                       sed 's/^CONFIG_PACKAGE_//;s/=y//;s/^"//;s/"$//' | \
+                       tr 'A-Z' 'a-z' | tr '\n' ' ')" \
+            FILES="custom-files"
 
     - name: Upload artifacts to workflow
       uses: actions/upload-artifact@v4
@@ -57,3 +73,4 @@ jobs:
         files: |
           imagebuilder/bin/targets/*/*/*.bin
           imagebuilder/bin/targets/*/*/*.gz
+          imagebuilder/bin/targets/*/*/*.manifest
