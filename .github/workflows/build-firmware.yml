@@ -18,6 +18,8 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # 确保获取所有文件
 
     - name: Install dependencies
       run: |
@@ -36,52 +38,56 @@ jobs:
         wget $IMAGEBUILDER_URL
         tar -I zstd -xf $IMAGEBUILDER_ARCHIVE
 
-    - name: Prepare and copy custom IPK packages
+    - name: Prepare custom IPK packages
       run: |
         mkdir -p $IMAGEBUILDER_DIR/packages/custom
         if [ -d "$SOFTS_DIR" ]; then
-          # 只拷贝 ipk 文件
-          find "$SOFTS_DIR" -type f -name "*.ipk" -exec cp {} "$IMAGEBUILDER_DIR/packages/custom/" \;
+          find "$SOFTS_DIR" -type f -name "*.ipk" -exec cp -v {} "$IMAGEBUILDER_DIR/packages/custom/" \;
         fi
+        # 验证IPK文件是否复制成功
+        echo "==== Copied IPK files ===="
+        ls -lh $IMAGEBUILDER_DIR/packages/custom/
 
-    - name: Parse plugins.list and custom ipk to get package names
+    - name: Parse plugins and packages
       id: get_pkgs
       run: |
-        # 解析 plugins.list
-        PKGS=""
+        # 解析plugins.list（支持换行和空格分隔）
+        BASE_PKGS=""
         if [ -f "$PLUGINS_FILE" ]; then
-          PKGS=$(grep -vE '^\s*#|^\s*$' "$PLUGINS_FILE" | xargs)
+          BASE_PKGS=$(grep -vE '^\s*#|^\s*$' "$PLUGINS_FILE" | tr '\n' ' ')
         fi
 
-        # 解析 custom 目录下所有 ipk 包名（_第一个下划线前为包名）
+        # 获取所有自定义IPK的包名（格式：包名_版本_架构.ipk）
         CUSTOM_PKGS=""
         if [ -d "$IMAGEBUILDER_DIR/packages/custom" ]; then
           for ipk in "$IMAGEBUILDER_DIR/packages/custom/"*.ipk; do
             [ -e "$ipk" ] || continue
             pkgname=$(basename "$ipk" | awk -F_ '{print $1}')
-            # 避免重复添加
-            if [[ ! " $PKGS $CUSTOM_PKGS " =~ " $pkgname " ]]; then
-              CUSTOM_PKGS="$CUSTOM_PKGS $pkgname"
-            fi
+            CUSTOM_PKGS="$CUSTOM_PKGS $pkgname"
           done
         fi
 
-        # 合并 plugins.list 与 custom ipk 包名
-        ALL_PKGS="$PKGS $CUSTOM_PKGS"
-        # 去重
-        FINAL_PKGS=$(echo $ALL_PKGS | tr ' ' '\n' | sort -u | xargs)
-        echo "FINAL_PKGS=$FINAL_PKGS" >> $GITHUB_ENV
+        # 合并所有包并去重
+        ALL_PKGS=$(echo "$BASE_PKGS $CUSTOM_PKGS" | tr ' ' '\n' | sort -u | xargs)
+        
+        # 调试输出
+        echo "Base packages: $BASE_PKGS"
+        echo "Custom IPK packages: $CUSTOM_PKGS"
+        echo "All packages: $ALL_PKGS"
+        
+        # 写入环境变量
+        echo "FINAL_PKGS=$ALL_PKGS" >> $GITHUB_ENV
 
     - name: Build firmware
       run: |
         cd $IMAGEBUILDER_DIR
         make image \
-          EXTRA_PACKAGES="$FINAL_PKGS" \
+          PACKAGES="$FINAL_PKGS" \
           FILES=../files \
           IMAGE_SIZE="$IMAGE_SIZE" \
           -j$(nproc)
         mkdir -p ../$OUTPUT_DIR
-        cp -r bin/targets/x86/64/* ../$OUTPUT_DIR/
+        cp -v bin/targets/x86/64/* ../$OUTPUT_DIR/
 
     - name: Upload firmware to Artifacts
       uses: actions/upload-artifact@v4
@@ -101,6 +107,9 @@ jobs:
         name: "ImmortalWrt x86_64 Firmware ${{ steps.release_tag.outputs.tag }}"
         body: |
           This is an automated build of ImmortalWrt x86_64 firmware.
+          Includes:
+          - Base packages: `${{ env.FINAL_PKGS }}`
+          - Custom IPKs from softs directory
         files: ${{ env.OUTPUT_DIR }}/*
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
