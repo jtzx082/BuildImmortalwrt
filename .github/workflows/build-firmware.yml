@@ -36,40 +36,47 @@ jobs:
         wget $IMAGEBUILDER_URL
         tar -I zstd -xf $IMAGEBUILDER_ARCHIVE
 
-    - name: Prepare custom IPK packages
+    - name: Prepare and copy custom IPK packages
       run: |
         mkdir -p $IMAGEBUILDER_DIR/packages/custom
         if [ -d "$SOFTS_DIR" ]; then
+          # 只拷贝 ipk 文件
           find "$SOFTS_DIR" -type f -name "*.ipk" -exec cp {} "$IMAGEBUILDER_DIR/packages/custom/" \;
         fi
 
-    - name: Parse plugins.list and custom ipks to get package names
-      id: collect_pkgs
+    - name: Parse plugins.list and custom ipk to get package names
+      id: get_pkgs
       run: |
-        # 解析插件列表
-        PLUGINS=""
+        # 解析 plugins.list
+        PKGS=""
         if [ -f "$PLUGINS_FILE" ]; then
-          PLUGINS=$(grep -vE '^\s*#|^\s*$' "$PLUGINS_FILE" | xargs)
+          PKGS=$(grep -vE '^\s*#|^\s*$' "$PLUGINS_FILE" | xargs)
         fi
 
-        # 获取 custom 目录下所有ipk包名
+        # 解析 custom 目录下所有 ipk 包名（_第一个下划线前为包名）
         CUSTOM_PKGS=""
         if [ -d "$IMAGEBUILDER_DIR/packages/custom" ]; then
           for ipk in "$IMAGEBUILDER_DIR/packages/custom/"*.ipk; do
             [ -e "$ipk" ] || continue
             pkgname=$(basename "$ipk" | awk -F_ '{print $1}')
-            CUSTOM_PKGS="$CUSTOM_PKGS $pkgname"
+            # 避免重复添加
+            if [[ ! " $PKGS $CUSTOM_PKGS " =~ " $pkgname " ]]; then
+              CUSTOM_PKGS="$CUSTOM_PKGS $pkgname"
+            fi
           done
         fi
 
-        echo "PLUGINS=$PLUGINS" >> $GITHUB_ENV
-        echo "CUSTOM_PKGS=$CUSTOM_PKGS" >> $GITHUB_ENV
+        # 合并 plugins.list 与 custom ipk 包名
+        ALL_PKGS="$PKGS $CUSTOM_PKGS"
+        # 去重
+        FINAL_PKGS=$(echo $ALL_PKGS | tr ' ' '\n' | sort -u | xargs)
+        echo "FINAL_PKGS=$FINAL_PKGS" >> $GITHUB_ENV
 
     - name: Build firmware
       run: |
         cd $IMAGEBUILDER_DIR
         make image \
-          EXTRA_PACKAGES="${CUSTOM_PKGS} ${PLUGINS}" \
+          EXTRA_PACKAGES="$FINAL_PKGS" \
           FILES=../files \
           IMAGE_SIZE="$IMAGE_SIZE" \
           -j$(nproc)
