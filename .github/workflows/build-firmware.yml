@@ -13,13 +13,14 @@ jobs:
       SOFTS_DIR: "softs"
       PLUGINS_FILE: "plugins.list"
       OUTPUT_DIR: "output"
-      IMAGE_SIZE: "1024MB"
+      IMAGE_SIZE: "2048MB"  # 增加固件大小到2GB
+      ROOTFS_SIZE: "2048"   # 增加根文件系统大小
 
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
-        fetch-depth: 0  # 确保获取所有文件
+        fetch-depth: 0
 
     - name: Install dependencies
       run: |
@@ -44,20 +45,19 @@ jobs:
         if [ -d "$SOFTS_DIR" ]; then
           find "$SOFTS_DIR" -type f -name "*.ipk" -exec cp -v {} "$IMAGEBUILDER_DIR/packages/custom/" \;
         fi
-        # 验证IPK文件是否复制成功
         echo "==== Copied IPK files ===="
         ls -lh $IMAGEBUILDER_DIR/packages/custom/
 
     - name: Parse plugins and packages
       id: get_pkgs
       run: |
-        # 解析plugins.list（支持换行和空格分隔）
+        # 解析plugins.list
         BASE_PKGS=""
         if [ -f "$PLUGINS_FILE" ]; then
           BASE_PKGS=$(grep -vE '^\s*#|^\s*$' "$PLUGINS_FILE" | tr '\n' ' ')
         fi
 
-        # 获取所有自定义IPK的包名（格式：包名_版本_架构.ipk）
+        # 获取所有自定义IPK的包名
         CUSTOM_PKGS=""
         if [ -d "$IMAGEBUILDER_DIR/packages/custom" ]; then
           for ipk in "$IMAGEBUILDER_DIR/packages/custom/"*.ipk; do
@@ -70,7 +70,6 @@ jobs:
         # 合并所有包并去重
         ALL_PKGS=$(echo "$BASE_PKGS $CUSTOM_PKGS" | tr ' ' '\n' | sort -u | xargs)
         
-        # 调试输出
         echo "Base packages: $BASE_PKGS"
         echo "Custom IPK packages: $CUSTOM_PKGS"
         echo "All packages: $ALL_PKGS"
@@ -78,14 +77,19 @@ jobs:
         # 写入环境变量
         echo "FINAL_PKGS=$ALL_PKGS" >> $GITHUB_ENV
 
-    - name: Build firmware
+    - name: Build firmware with increased space
       run: |
         cd $IMAGEBUILDER_DIR
+        # 增加根文件系统大小配置
+        echo "CONFIG_TARGET_ROOTFS_PARTSIZE=$ROOTFS_SIZE" >> .config
+        
+        # 构建固件
         make image \
           PACKAGES="$FINAL_PKGS" \
           FILES=../files \
           IMAGE_SIZE="$IMAGE_SIZE" \
           -j$(nproc)
+          
         mkdir -p ../$OUTPUT_DIR
         cp -v bin/targets/x86/64/* ../$OUTPUT_DIR/
 
