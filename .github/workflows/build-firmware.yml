@@ -13,6 +13,7 @@ jobs:
       SOFTS_DIR: "softs"
       PLUGINS_FILE: "plugins.list"
       OUTPUT_DIR: "output"
+      IMAGE_SIZE: "1024MB"
 
     steps:
     - name: Checkout repository
@@ -40,7 +41,7 @@ jobs:
       run: |
         mkdir -p $IMAGEBUILDER_DIR/packages/custom
         if [ -d "$SOFTS_DIR" ]; then
-          cp $SOFTS_DIR/*.ipk $IMAGEBUILDER_DIR/packages/custom/ || true
+          find "$SOFTS_DIR" -maxdepth 1 -type f -name '*.ipk' -exec cp {} "$IMAGEBUILDER_DIR/packages/custom/" \;
         fi
 
     - name: Parse plugins.list to get package names
@@ -57,9 +58,18 @@ jobs:
     - name: Build firmware
       run: |
         cd $IMAGEBUILDER_DIR
+        # 自动查找 custom/*.ipk，拼接包名字符串
+        CUSTOM_PKGS=""
+        for ipk in packages/custom/*.ipk; do
+          [ -e "$ipk" ] || continue
+          pkgname=$(basename "$ipk" | sed 's/_.*//')
+          CUSTOM_PKGS="$CUSTOM_PKGS $pkgname"
+        done
+
         make image \
-          EXTRA_PACKAGES="custom/*.ipk $PKGS" \
+          EXTRA_PACKAGES="$CUSTOM_PKGS $PKGS" \
           FILES=../files \
+          IMAGE_SIZE="$IMAGE_SIZE" \
           -j$(nproc)
         mkdir -p ../$OUTPUT_DIR
         cp -r bin/targets/x86/64/* ../$OUTPUT_DIR/
