@@ -15,7 +15,7 @@ jobs:
       OUTPUT_DIR: "output"
       IMAGE_SIZE: "2048MB"
       ROOTFS_SIZE: "2048"
-      UPLOAD_RELEASE: 'true'
+      UPLOAD_RELEASE: "true"  # 确保删除旧release步骤能执行
 
     steps:
     - name: Checkout repository
@@ -33,7 +33,7 @@ jobs:
           libreadline-dev libssl-dev libtool libyaml-dev libz-dev lld llvm lrzsz mkisofs msmtp nano \
           ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip python3-ply python3-docutils \
           python3-pyelftools qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo uglifyjs \
-          upx-ucl unzip vim wget xmlto xxd zlib1g-dev zip zstd
+          upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
 
     - name: Download ImmortalWrt ImageBuilder
       run: |
@@ -81,10 +81,8 @@ jobs:
     - name: Build firmware with increased space
       run: |
         cd $IMAGEBUILDER_DIR
-        # 增加根文件系统大小配置
         echo "CONFIG_TARGET_ROOTFS_PARTSIZE=$ROOTFS_SIZE" >> .config
         
-        # 构建固件
         make image \
           PACKAGES="$FINAL_PKGS" \
           FILES=../files \
@@ -93,13 +91,6 @@ jobs:
           
         mkdir -p ../$OUTPUT_DIR
         cp -v bin/targets/x86/64/* ../$OUTPUT_DIR/
-
-    - name: Compress firmware artifacts
-      run: |
-        cd $OUTPUT_DIR
-        zip -r ../firmware.zip .
-        cd ..
-        echo "ZIP_PATH=$(pwd)/firmware.zip" >> $GITHUB_ENV
 
     - name: Upload firmware to Artifacts
       uses: actions/upload-artifact@v4
@@ -112,20 +103,45 @@ jobs:
       run: |
         echo "tag=auto-build-$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
 
-    - name: Create GitHub Release
-      uses: softprops/action-gh-release@v3  # 升级到v3解决文件句柄问题
+    # 修复：使用替代方案创建Release
+    - name: Create Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         tag_name: ${{ steps.release_tag.outputs.tag }}
-        name: "ImmortalWrt x86_64 Firmware ${{ steps.release_tag.outputs.tag }}"
+        release_name: "ImmortalWrt x86_64 Firmware ${{ steps.release_tag.outputs.tag }}"
         body: |
           This is an automated build of ImmortalWrt x86_64 firmware.
           Includes:
           - Base packages: `${{ env.FINAL_PKGS }}`
           - Custom IPKs from softs directory
-        files: ${{ env.ZIP_PATH }}  # 上传单个压缩文件
+        draft: false
+        prerelease: false
+
+    # 修复：使用独立的上传步骤
+    - name: Upload Release Assets
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ${{ env.OUTPUT_DIR }}/
+        asset_name: ${{ env.OUTPUT_DIR }}
+        asset_content_type: application/zip
 
     - name: Delete workflow runs
       uses: Mattraks/delete-workflow-runs@main
       with:
         retain_days: 0
         keep_minimum_runs: 2
+
+    - name: Remove old Releases
+      uses: dev-drprasad/delete-older-releases@master
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      with:
+        keep_latest: 3
+        delete_tags: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
