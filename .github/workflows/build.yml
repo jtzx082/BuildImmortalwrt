@@ -1,0 +1,84 @@
+name: Build OpenWrt ImageBuilder Firmware
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    env:
+      ARCH: x86-64
+      IMAGEBUILDER_TAG: x86-64-24.10-SNAPSHOT
+      IMAGEBUILDER_IMAGE: immortalwrt/imagebuilder:x86-64-24.10-SNAPSHOT
+      IMAGE_SIZE: "2048MB"      # 增加固件最大容量到2GB
+      ROOTFS_SIZE: "2048"       # 增加根文件系统大小（单位MB）
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare softs/ipk packages
+        run: |
+          mkdir -p ./ipks
+          if [ -d "./softs" ]; then
+            cp ./softs/*.ipk ./ipks/ || true
+          fi
+
+      - name: Read plugins.list to set packages
+        id: plugins
+        run: |
+          if [ -f plugins.list ]; then
+            pkgs=$(grep -v '^#' plugins.list | xargs | tr '\n' ' ')
+            echo "PKGS=$pkgs" >> $GITHUB_ENV
+          else
+            echo "PKGS=" >> $GITHUB_ENV
+          fi
+
+      - name: Docker pull ImageBuilder
+        run: docker pull $IMAGEBUILDER_IMAGE
+
+      - name: Build firmware using ImageBuilder
+        run: |
+          mkdir -p output
+          docker run --rm \
+            -v ${{ github.workspace }}:/builder \
+            -w /builder \
+            $IMAGEBUILDER_IMAGE \
+            bash -c "\
+              [ -d ./ipks ] && cp ./ipks/*.ipk ./packages/ 2>/dev/null || true; \
+              make image PACKAGES=\"\$PKGS\" EXTRA_IMAGE_NAME=custom \
+                FILES=files \
+                IMAGE_SIZE=$IMAGE_SIZE \
+                ROOTFS_SIZE=$ROOTFS_SIZE || exit 1; \
+              cp -r bin/targets/*/*/*.img* bin/targets/*/*/*.bin* /builder/output/ || true; \
+              cp -r bin/targets/*/*/packages/*.ipk /builder/output/ || true; \
+              ls -lh /builder/output || true
+            "
+
+      - name: Upload firmware to Actions Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-firmware
+          path: output/
+
+      - name: Create GitHub Release
+        id: create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}-firmware-${{ github.run_number }}
+          name: "OpenWrt Firmware Build ${{ github.run_number }}"
+          body: |
+            自动编译固件，包含 plugins.list 指定包和 softs/ 下的 ipk。
+            固件最大容量：${{ env.IMAGE_SIZE }}，根文件系统大小：${{ env.ROOTFS_SIZE }}MB。
+          draft: false
+          prerelease: false
+
+      - name: Upload firmware to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.create_release.outputs.tag_name }}
+          name: "OpenWrt Firmware Build ${{ github.run_number }}"
+          files: output/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
