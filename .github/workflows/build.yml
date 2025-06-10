@@ -1,4 +1,4 @@
-name: Build ImmortalWrt Firmware Docker
+name: Build ImmortalWrt Firmware
 
 on:
   workflow_dispatch:
@@ -35,6 +35,9 @@ jobs:
           mkdir -p ${{ env.BUILD_DIR }}/packages/custom
           mkdir -p ${{ env.OUTPUT_DIR }}
           mkdir -p ${{ env.BUILD_DIR }}/files
+          
+          # 确保自定义包目录有写入权限
+          chmod -R a+rw ${{ env.BUILD_DIR }}/packages/custom
 
       - name: Copy custom files
         run: |
@@ -61,8 +64,8 @@ jobs:
           if [ -n "$(ls -A ${{ env.BUILD_DIR }}/packages/custom/*.ipk 2>/dev/null)" ]; then
             echo "Generating custom package index"
             
-            # 使用Docker容器生成索引（避免主机依赖问题）
-            docker run --rm \
+            # 使用Docker容器生成索引 - 使用root用户避免权限问题
+            docker run --rm --user root \
               -v ${{ env.BUILD_DIR }}/packages/custom:/custom \
               ${{ env.IMAGE_NAME }} \
               /bin/bash -c "cd /custom && opkg-make-index . > Packages && gzip -c Packages > Packages.gz"
