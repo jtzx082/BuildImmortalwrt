@@ -1,97 +1,98 @@
-name: Build OpenWrt ImageBuilder Firmware
+name: Build ImmortalWrt Firmware
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag (e.g., v1.0)'
+        required: true
+        default: 'nightly'
+      image_size:
+        description: 'Firmware image size (e.g., 2048MB)'
+        required: false
+        default: '2048MB'
+      rootfs_size:
+        description: 'RootFS partition size (e.g., 2048)'
+        required: false
+        default: '2048'
+
+env:
+  IMAGE_NAME: immortalwrt/imagebuilder:x86-64-24.10-SNAPSHOT
+  BUILD_DIR: ${{ github.workspace }}/imagebuilder
+  OUTPUT_DIR: ${{ github.workspace }}/bin
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
-    env:
-      ARCH: x86-64
-      IMAGEBUILDER_TAG: x86-64-24.10-SNAPSHOT
-      IMAGEBUILDER_IMAGE: immortalwrt/imagebuilder:x86-64-24.10-SNAPSHOT
-      IMAGE_SIZE: "2048MB"
-      ROOTFS_SIZE: "2048"
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-      - name: Prepare softs/ipk packages
+      - name: Prepare directories
         run: |
-          mkdir -p ./ipks
-          if [ -d "./softs" ]; then
-            cp ./softs/*.ipk ./ipks/ || true
-          fi
+          mkdir -p ${{ env.BUILD_DIR }}/packages/custom
+          mkdir -p ${{ env.OUTPUT_DIR }}
 
-      - name: Read plugins.list to set packages
-        id: plugins
+      - name: Copy custom files
         run: |
-          if [ -f plugins.list ]; then
-            pkgs=$(grep -v '^#' plugins.list | xargs | tr '\n' ' ')
-            echo "PKGS=$pkgs" >> $GITHUB_ENV
-          else
-            echo "PKGS=" >> $GITHUB_ENV
-          fi
+          # 复制IPK文件到packages目录
+          cp -R softs/*.ipk ${{ env.BUILD_DIR }}/packages/custom/ || true
+          
+          # 复制插件列表
+          cp plugins.list ${{ env.BUILD_DIR }}/ || true
+          
+          echo "Custom files copied successfully"
 
-      - name: Docker pull ImageBuilder
-        run: docker pull $IMAGEBUILDER_IMAGE
+      - name: Pull Docker image
+        run: docker pull ${{ env.IMAGE_NAME }}
 
-      - name: Build firmware using ImageBuilder
+      - name: Build firmware
         run: |
-          mkdir -p output
+          # 读取插件列表并转换为空格分隔格式
+          PACKAGES=$(tr '\n' ' ' < ${{ env.BUILD_DIR }}/plugins.list)
+          
           docker run --rm \
-            -v ${{ github.workspace }}:/custom \
-            $IMAGEBUILDER_IMAGE \
-            bash -c '
-              # 复制自定义文件到ImageBuilder工作目录
-              [ -d /custom/ipks ] && cp /custom/ipks/*.ipk packages/ 2>/dev/null || true
-              [ -d /custom/files ] && cp -r /custom/files . 2>/dev/null || true
-              
-              # 设置构建参数
-              export IMAGE_SIZE="${IMAGE_SIZE}"
-              export ROOTFS_SIZE="${ROOTFS_SIZE}"
-              
-              # 执行构建命令
-              if [ -d files ]; then 
-                make FILES=files PACKAGES="$PKGS" EXTRA_IMAGE_NAME=custom \
-                  IMAGE_SIZE="${IMAGE_SIZE}" ROOTFS_SIZE="${ROOTFS_SIZE}"
-              else
-                make PACKAGES="$PKGS" EXTRA_IMAGE_NAME=custom \
-                  IMAGE_SIZE="${IMAGE_SIZE}" ROOTFS_SIZE="${ROOTFS_SIZE}"
-              fi || exit 1
-              
-              # 复制构建产物
-              mkdir -p /custom/output
-              find bin/targets -type f \( -name "*.img*" -o -name "*.bin*" \) -exec cp {} /custom/output/ \;
-              find bin/targets -type f -name "*.ipk" -exec cp {} /custom/output/ \;
-              ls -lh /custom/output || true
-            '
+            -v ${{ env.BUILD_DIR }}:/home/build/openwrt \
+            -v ${{ env.OUTPUT_DIR }}:/home/build/openwrt/bin \
+            ${{ env.IMAGE_NAME }} \
+            /bin/bash -c "
+            # 添加自定义软件包源
+            echo 'src custom file://packages/custom' >> repositories.conf
+            # 更新软件包索引
+            ./scripts/feeds update -a
+            # 设置分区大小
+            sed -i \"s/CONFIG_TARGET_ROOTFS_PARTSIZE=.*/CONFIG_TARGET_ROOTFS_PARTSIZE=${{ inputs.rootfs_size }}/\" .config
+            # 开始构建固件
+            make image PACKAGES=\"$PACKAGES\" PROFILE=\"generic\" FILES=\"files/\" \
+            CONFIG_TARGET_ROOTFS_PARTSIZE=${{ inputs.rootfs_size }} \
+            CONFIG_TARGET_IMAGES_GZIP=y
+          "
 
-      - name: Upload firmware to Actions Artifacts
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: openwrt-firmware
-          path: output/
+          name: firmware-binaries
+          path: ${{ env.OUTPUT_DIR }}/*.gz
+          retention-days: 7
 
-      - name: Create GitHub Release
-        id: create_release
-        uses: softprops/action-gh-release@v2
+      - name: Create release
+        uses: softprops/action-gh-release@v1
+        if: ${{ inputs.release_tag != 'nightly' }}
         with:
-          tag_name: ${{ github.ref_name }}-firmware-${{ github.run_number }}
-          name: "OpenWrt Firmware Build ${{ github.run_number }}"
-          body: |
-            自动编译固件，包含 plugins.list 指定包和 softs/ 下的 ipk。
-            固件最大容量：${{ env.IMAGE_SIZE }}，根文件系统大小：${{ env.ROOTFS_SIZE }}MB。
+          tag_name: ${{ inputs.release_tag }}
+          name: ImmortalWrt Build ${{ inputs.release_tag }}
+          files: ${{ env.OUTPUT_DIR }}/*.gz
           draft: false
           prerelease: false
 
-      - name: Upload firmware to GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Upload nightly build
+        if: ${{ inputs.release_tag == 'nightly' }}
+        uses: softprops/action-gh-release@v1
         with:
-          tag_name: ${{ steps.create_release.outputs.tag_name }}
-          name: "OpenWrt Firmware Build ${{ github.run_number }}"
-          files: output/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: nightly-${{ github.run_id }}
+          name: Nightly Build (${{ github.run_id }})
+          files: ${{ env.OUTPUT_DIR }}/*.gz
+          draft: false
+          prerelease: true
