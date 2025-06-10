@@ -105,7 +105,7 @@ jobs:
         echo "tag=auto-build-$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
 
     - name: Create GitHub Release
-      uses: softprops/action-gh-release@v2
+      uses: softprops/action-gh-release@v1
       with:
         tag_name: ${{ steps.release_tag.outputs.tag }}
         name: "ImmortalWrt x86_64 Firmware ${{ steps.release_tag.outputs.tag }}"
