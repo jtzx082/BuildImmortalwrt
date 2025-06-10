@@ -1,4 +1,4 @@
-name: Build ImmortalWrt Firmware
+name: Build ImmortalWrt Firmware Docker
 
 on:
   workflow_dispatch:
