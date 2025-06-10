@@ -43,6 +43,17 @@ jobs:
           [ -d files ] && cp -R files/* ${{ env.BUILD_DIR }}/files/
           echo "Custom files copied successfully"
 
+      - name: Install opkg-utils and Generate custom package index
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-opkg
+          if [ -d "${{ env.BUILD_DIR }}/packages/custom" ] && [ "$(ls -A ${{ env.BUILD_DIR }}/packages/custom/*.ipk 2>/dev/null)" ]; then
+            cd ${{ env.BUILD_DIR }}/packages/custom
+            opkg-make-index . > Packages
+            gzip -c Packages > Packages.gz
+            cd -
+          fi
+
       - name: Pull Docker image
         run: docker pull ${{ env.IMAGE_NAME }}
 
@@ -61,14 +72,6 @@ jobs:
             /bin/bash -c "
             set -e
             cd /home/build/openwrt
-
-            # 生成自定义软件包索引（用容器里的 opkg-make-index）
-            if [ -d packages/custom ] && [ \"\$(ls -A packages/custom/*.ipk 2>/dev/null)\" ]; then
-              cd packages/custom
-              opkg-make-index . > Packages
-              gzip -c Packages > Packages.gz
-              cd ../..
-            fi
 
             # 添加自定义软件包源
             echo 'src custom file://packages/custom' >> repositories.conf
