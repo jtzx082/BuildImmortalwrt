@@ -38,30 +38,23 @@ jobs:
 
       - name: Copy custom files
         run: |
-          # 复制IPK文件到packages目录
           [ -d softs ] && find softs -name '*.ipk' -exec cp {} ${{ env.BUILD_DIR }}/packages/custom/ \;
-          
-          # 复制插件列表
           [ -f plugins.list ] && cp plugins.list ${{ env.BUILD_DIR }}/
-          
-          # 复制自定义配置文件
           [ -d files ] && cp -R files/* ${{ env.BUILD_DIR }}/files/
-          
           echo "Custom files copied successfully"
 
       - name: Pull Docker image
         run: docker pull ${{ env.IMAGE_NAME }}
 
-      - name: Build firmware (and make custom package index in container)
+      - name: Build firmware (run as root in container)
         run: |
-          # 读取插件列表并转换为空格分隔格式
           if [ -f "${{ env.BUILD_DIR }}/plugins.list" ]; then
             PACKAGES=$(tr '\n' ' ' < ${{ env.BUILD_DIR }}/plugins.list)
           else
             PACKAGES=""
           fi
 
-          docker run --rm \
+          docker run --rm --user 0 \
             -v ${{ env.BUILD_DIR }}:/home/build/openwrt \
             -v ${{ env.OUTPUT_DIR }}:/home/build/openwrt/bin \
             ${{ env.IMAGE_NAME }} \
@@ -81,11 +74,11 @@ jobs:
             echo 'src custom file://packages/custom' >> repositories.conf
 
             # 设置分区大小
-            sed -i \"s/CONFIG_TARGET_ROOTFS_PARTSIZE=.*/CONFIG_TARGET_ROOTFS_PARTSIZE=${{ inputs.rootfs_size }}/\" .config || true
+            sed -i \"s/CONFIG_TARGET_ROOTFS_PARTSIZE=.*/CONFIG_TARGET_ROOTFS_PARTSIZE=${{ inputs.rootfs_size || '2048' }}/\" .config || true
 
             # 开始构建固件
             make image PACKAGES=\"base-files \$PACKAGES\" PROFILE=\"generic\" FILES=\"files/\" \
-              CONFIG_TARGET_ROOTFS_PARTSIZE=${{ inputs.rootfs_size }} \
+              CONFIG_TARGET_ROOTFS_PARTSIZE=${{ inputs.rootfs_size || '2048' }} \
               CONFIG_TARGET_IMAGES_GZIP=y
           "
 
