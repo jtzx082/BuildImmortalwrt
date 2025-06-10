@@ -1,4 +1,4 @@
-name: Build ImmortalWrt Firmware
+name: Build ImmortalWrt Firmware优化
 
 on:
   workflow_dispatch:
