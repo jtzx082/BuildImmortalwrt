@@ -49,23 +49,10 @@ jobs:
           
           echo "Custom files copied successfully"
 
-      - name: Generate custom package index
-        run: |
-          # 安装生成索引所需的工具
-          sudo apt-get update
-          sudo apt-get install -y opkg-utils
-          
-          # 生成自定义软件包索引
-          (cd ${{ env.BUILD_DIR }}/packages/custom && \
-           opkg-make-index . > Packages && \
-           gzip -c Packages > Packages.gz)
-          
-          echo "Custom package index generated"
-
       - name: Pull Docker image
         run: docker pull ${{ env.IMAGE_NAME }}
 
-      - name: Build firmware
+      - name: Build firmware (and make custom package index in container)
         run: |
           # 读取插件列表并转换为空格分隔格式
           if [ -f "${{ env.BUILD_DIR }}/plugins.list" ]; then
@@ -73,29 +60,33 @@ jobs:
           else
             PACKAGES=""
           fi
-          
+
           docker run --rm \
             -v ${{ env.BUILD_DIR }}:/home/build/openwrt \
             -v ${{ env.OUTPUT_DIR }}:/home/build/openwrt/bin \
             ${{ env.IMAGE_NAME }} \
             /bin/bash -c "
+            set -e
+            cd /home/build/openwrt
+
+            # 生成自定义软件包索引（用容器里的 opkg-make-index）
+            if [ -d packages/custom ] && [ \"\$(ls -A packages/custom/*.ipk 2>/dev/null)\" ]; then
+              cd packages/custom
+              opkg-make-index . > Packages
+              gzip -c Packages > Packages.gz
+              cd ../..
+            fi
+
             # 添加自定义软件包源
             echo 'src custom file://packages/custom' >> repositories.conf
-            
-            # 更新软件包索引
-            ./scripts/feeds update -a
-            
+
             # 设置分区大小
-            sed -i \"s/CONFIG_TARGET_ROOTFS_PARTSIZE=.*/CONFIG_TARGET_ROOTFS_PARTSIZE=${{ inputs.rootfs_size }}/\" .config
-            
-            # 安装必要的基础包
-            make package/install
-            make package/index
-            
+            sed -i \"s/CONFIG_TARGET_ROOTFS_PARTSIZE=.*/CONFIG_TARGET_ROOTFS_PARTSIZE=${{ inputs.rootfs_size }}/\" .config || true
+
             # 开始构建固件
-            make image PACKAGES=\"base-files $PACKAGES\" PROFILE=\"generic\" FILES=\"files/\" \
-            CONFIG_TARGET_ROOTFS_PARTSIZE=${{ inputs.rootfs_size }} \
-            CONFIG_TARGET_IMAGES_GZIP=y
+            make image PACKAGES=\"base-files \$PACKAGES\" PROFILE=\"generic\" FILES=\"files/\" \
+              CONFIG_TARGET_ROOTFS_PARTSIZE=${{ inputs.rootfs_size }} \
+              CONFIG_TARGET_IMAGES_GZIP=y
           "
 
       - name: Upload artifacts
