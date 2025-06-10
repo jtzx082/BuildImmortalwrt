@@ -42,18 +42,31 @@ jobs:
         run: |
           mkdir -p output
           docker run --rm \
-            -v ${{ github.workspace }}:/builder \
-            -w /builder \
+            -v ${{ github.workspace }}:/custom \
             $IMAGEBUILDER_IMAGE \
             bash -c '
-              [ -d ./ipks ] && cp ./ipks/*.ipk ./packages/ 2>/dev/null || true
+              # 复制自定义文件到ImageBuilder工作目录
+              [ -d /custom/ipks ] && cp /custom/ipks/*.ipk packages/ 2>/dev/null || true
+              [ -d /custom/files ] && cp -r /custom/files . 2>/dev/null || true
+              
+              # 设置构建参数
               export IMAGE_SIZE="${IMAGE_SIZE}"
               export ROOTFS_SIZE="${ROOTFS_SIZE}"
-              if [ -d files ]; then files_opt="FILES=files"; else files_opt=""; fi
-              make $files_opt PACKAGES="$PKGS" EXTRA_IMAGE_NAME=custom IMAGE_SIZE="${IMAGE_SIZE}" ROOTFS_SIZE="${ROOTFS_SIZE}" || exit 1
-              cp -r bin/targets/*/*/*.img* bin/targets/*/*/*.bin* /builder/output/ 2>/dev/null || true
-              cp -r bin/targets/*/*/packages/*.ipk /builder/output/ 2>/dev/null || true
-              ls -lh /builder/output || true
+              
+              # 执行构建命令
+              if [ -d files ]; then 
+                make FILES=files PACKAGES="$PKGS" EXTRA_IMAGE_NAME=custom \
+                  IMAGE_SIZE="${IMAGE_SIZE}" ROOTFS_SIZE="${ROOTFS_SIZE}"
+              else
+                make PACKAGES="$PKGS" EXTRA_IMAGE_NAME=custom \
+                  IMAGE_SIZE="${IMAGE_SIZE}" ROOTFS_SIZE="${ROOTFS_SIZE}"
+              fi || exit 1
+              
+              # 复制构建产物
+              mkdir -p /custom/output
+              find bin/targets -type f \( -name "*.img*" -o -name "*.bin*" \) -exec cp {} /custom/output/ \;
+              find bin/targets -type f -name "*.ipk" -exec cp {} /custom/output/ \;
+              ls -lh /custom/output || true
             '
 
       - name: Upload firmware to Actions Artifacts
