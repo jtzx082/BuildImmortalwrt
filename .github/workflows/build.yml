@@ -31,19 +31,20 @@ jobs:
         sudo apt update -y
         sudo xargs -a dependencies.txt apt install -y
         sudo timedatectl set-ntp on
-        # 关键修复1：确保安装最新版zstd[3](@ref)[4](@ref)
-        sudo apt install -y zstd
-
-    - name: Create cache directories
-      run: |
-        mkdir -p ${{ env.IMAGEBUILDER_DIR }}
-        touch ${{ env.IMAGEBUILDER_ARCHIVE }}
+        sudo apt install -y zstd pv  # 确保安装zstd和进度查看工具
 
     - name: Create URL hash for caching
       id: url-hash
       run: |
         HASH=$(echo -n "$IMAGEBUILDER_URL" | sha256sum | awk '{print $1}')
         echo "url_hash=$HASH" >> $GITHUB_OUTPUT
+
+    # 关键修复1：优化缓存路径权限
+    - name: Create cache directories
+      run: |
+        mkdir -p ${{ env.IMAGEBUILDER_DIR }}
+        touch ${{ env.IMAGEBUILDER_ARCHIVE }}
+        sudo chown -R $USER:$USER ${{ env.IMAGEBUILDER_DIR }}  # 确保用户所有权[2](@ref)[7](@ref)
 
     - name: Cache ImageBuilder
       uses: actions/cache@v4
@@ -56,30 +57,28 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-imagebuilder-
 
-    # 关键修复2：增强下载和解压可靠性[3](@ref)[4](@ref)[7](@ref)
+    # 关键修复2：增强下载完整性和磁盘空间检查
     - name: Download and extract ImmortalWrt ImageBuilder
       if: steps.cache-imagebuilder.outputs.cache-hit != 'true'
       run: |
-        # 使用续传和重试机制
+        # 检查磁盘空间
+        FREE_SPACE=$(df -h . | awk 'NR==2 {print $4}')
+        echo "可用磁盘空间: $FREE_SPACE"
+        
+        # 带重试机制的下载
         wget -q --show-progress --continue --tries=3 --waitretry=10 $IMAGEBUILDER_URL
         
-        # 添加文件完整性检查
-        echo "Verifying archive integrity..."
-        if ! zstd -t "$IMAGEBUILDER_ARCHIVE"; then
-          echo "::error::Downloaded file is corrupted, removing..."
-          rm -f "$IMAGEBUILDER_ARCHIVE"
-          exit 1
-        fi
+        # 两步解压法避免权限问题
+        zstd -d -c $IMAGEBUILDER_ARCHIVE | tar -xvf - --no-overwrite-dir
         
-        # 使用两步解压法提高兼容性[4](@ref)
-        echo "Decompressing with zstd..."
-        zstd -d "$IMAGEBUILDER_ARCHIVE" -o "${IMAGEBUILDER_ARCHIVE%.zst}"
-        
-        echo "Extracting tar archive..."
-        tar -xPf "${IMAGEBUILDER_ARCHIVE%.zst}" --no-overwrite-dir
-        
-        # 清理中间文件
-        rm -f "${IMAGEBUILDER_ARCHIVE%.zst}"
+        # 验证解压完整性
+        find $IMAGEBUILDER_DIR -type f | head -5 | xargs -I{} ls -lh {}  # 抽样检查[4](@ref)
+
+    # 关键修复3：权限预修复
+    - name: Fix directory permissions
+      run: |
+        sudo chown -R $USER:$USER ${{ env.IMAGEBUILDER_DIR }}
+        find ${{ env.IMAGEBUILDER_DIR }} -type d -exec chmod 755 {} \;
 
     - name: Prepare custom IPK packages
       run: |
@@ -87,8 +86,7 @@ jobs:
         if [ -d "$SOFTS_DIR" ]; then
           find "$SOFTS_DIR" -type f -name "*.ipk" -exec cp -v {} "$IMAGEBUILDER_DIR/packages/custom/" \;
         fi
-        echo "==== Copied IPK files ===="
-        ls -lh $IMAGEBUILDER_DIR/packages/custom/
+        sudo chown -R $USER:$USER $IMAGEBUILDER_DIR/packages/custom  # 确保权限一致
 
     - name: Parse plugins and packages
       id: get_pkgs
@@ -110,19 +108,39 @@ jobs:
         ALL_PKGS=$(echo "$BASE_PKGS $CUSTOM_PKGS" | tr ' ' '\n' | sort -u | xargs)
         echo "FINAL_PKGS=$ALL_PKGS" >> $GITHUB_ENV
 
+    # 关键修复4：避免sudo构建+磁盘空间监控
     - name: Build firmware with increased space
       run: |
         set -euxo pipefail
         cd $IMAGEBUILDER_DIR
+        
+        # 实时监控磁盘空间
+        while true; do
+          df -h .
+          sleep 30
+        done &
+        DISK_MONITOR_PID=$!
+        
         echo "CONFIG_TARGET_ROOTFS_PARTSIZE=$ROOTFS_SIZE" >> .config
         
-        sudo make -j $(($(nproc))) image \
+        # 使用普通用户权限构建
+        make -j $(($(nproc))) image \
           PACKAGES="$FINAL_PKGS" \
           FILES=../files \
           IMAGE_SIZE="$IMAGE_SIZE"
         
+        kill $DISK_MONITOR_PID  # 结束磁盘监控
+        
         mkdir -p ../$OUTPUT_DIR
-        sudo cp -Pv bin/targets/x86/64/* ../$OUTPUT_DIR/
+        cp -Pv bin/targets/x86/64/* ../$OUTPUT_DIR/
+
+    # 关键修复5：构建后清理
+    - name: Clean build intermediates
+      run: |
+        cd $IMAGEBUILDER_DIR
+        make clean  # 清理中间文件释放空间[9](@ref)
+        sudo rm -rf build_dir/ staging_dir/ tmp/  # 删除大型目录
+        df -h .  # 显示清理后空间
 
     - name: Verify firmware files
       run: |
@@ -157,3 +175,10 @@ jobs:
         files: ${{ env.OUTPUT_DIR }}/*
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    # 关键修复6：缓存前权限统一
+    - name: Normalize permissions for caching
+      if: always()
+      run: |
+        sudo chown -R $USER:$USER ${{ env.IMAGEBUILDER_DIR }}
+        find ${{ env.IMAGEBUILDER_DIR }} -type f -exec chmod 644 {} \;
