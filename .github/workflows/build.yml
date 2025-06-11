@@ -26,30 +26,22 @@ jobs:
       with:
         fetch-depth: 0
 
-    # 修复1：使用正确的依赖文件路径
-    - name: Cache APT packages
-      uses: actions/cache@v4
-      id: apt-cache
-      with:
-        path: |
-          /var/cache/apt/archives
-          /var/lib/apt/lists
-        key: ${{ runner.os }}-apt-${{ hashFiles('dependencies.txt') }}
-        restore-keys: |
-          ${{ runner.os }}-apt-
-
+    # 修复1：移除APT缓存（因权限问题不可行）
     - name: Install dependencies
       run: |
         sudo apt update -y
         sudo xargs -a dependencies.txt apt install -y
-        sudo timedatectl set-ntp on  # 同步时间解决时间戳问题
+        sudo apt install -y parallel  # 提前安装parallel工具
+        sudo timedatectl set-ntp on
 
-    # 修复2：替换无效的hash()函数
+    # 修复2：使用更可靠的URL哈希生成方式
     - name: Create URL hash for caching
       id: url-hash
       run: |
-        echo "url_hash=$(echo $IMAGEBUILDER_URL | sha256sum | cut -d' ' -f1)" >> $GITHUB_OUTPUT
+        HASH=$(echo -n "$IMAGEBUILDER_URL" | sha256sum | awk '{print $1}')
+        echo "url_hash=$HASH" >> $GITHUB_OUTPUT
 
+    # 修复3：确保缓存路径存在
     - name: Cache ImageBuilder
       uses: actions/cache@v4
       id: cache-imagebuilder
@@ -64,7 +56,7 @@ jobs:
     - name: Download ImmortalWrt ImageBuilder
       if: steps.cache-imagebuilder.outputs.cache-hit != 'true'
       run: |
-        wget $IMAGEBUILDER_URL
+        wget -q --show-progress $IMAGEBUILDER_URL
         tar -I zstd -xPf $IMAGEBUILDER_ARCHIVE --no-overwrite-dir
 
     - name: Prepare custom IPK packages
@@ -76,10 +68,10 @@ jobs:
         echo "==== Copied IPK files ===="
         ls -lh $IMAGEBUILDER_DIR/packages/custom/
 
+    # 修复4：移除冗余的parallel安装
     - name: Parse plugins and packages
       id: get_pkgs
       run: |
-        sudo apt install -y parallel
         BASE_PKGS=""
         if [ -f "$PLUGINS_FILE" ]; then
           BASE_PKGS=$(grep -vE '^\s*#|^\s*$' "$PLUGINS_FILE" | parallel -j $(nproc) echo {} | tr '\n' ' ')
