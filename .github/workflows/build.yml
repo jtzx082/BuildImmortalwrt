@@ -26,22 +26,26 @@ jobs:
       with:
         fetch-depth: 0
 
-    # 修复1：移除APT缓存（因权限问题不可行）
     - name: Install dependencies
       run: |
         sudo apt update -y
         sudo xargs -a dependencies.txt apt install -y
-        sudo apt install -y parallel  # 提前安装parallel工具
         sudo timedatectl set-ntp on
 
-    # 修复2：使用更可靠的URL哈希生成方式
+    # 修复1：确保缓存目录存在
+    - name: Create cache directories
+      run: |
+        mkdir -p ${{ env.IMAGEBUILDER_DIR }}
+        touch ${{ env.IMAGEBUILDER_ARCHIVE }}
+
+    # 修复2：优化URL哈希生成
     - name: Create URL hash for caching
       id: url-hash
       run: |
         HASH=$(echo -n "$IMAGEBUILDER_URL" | sha256sum | awk '{print $1}')
         echo "url_hash=$HASH" >> $GITHUB_OUTPUT
 
-    # 修复3：确保缓存路径存在
+    # 修复3：缓存路径验证（关键修复）
     - name: Cache ImageBuilder
       uses: actions/cache@v4
       id: cache-imagebuilder
@@ -68,7 +72,6 @@ jobs:
         echo "==== Copied IPK files ===="
         ls -lh $IMAGEBUILDER_DIR/packages/custom/
 
-    # 修复4：移除冗余的parallel安装
     - name: Parse plugins and packages
       id: get_pkgs
       run: |
@@ -137,8 +140,5 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Clean up
-      if: always()
-      run: |
-        sudo rm -rf ${{ env.IMAGEBUILDER_DIR }}
-        sudo rm -f ${{ env.IMAGEBUILDER_ARCHIVE }}
+    # 修复4：移除清理步骤（避免缓存前删除文件）
+    # 注意：GitHub Runner会自动清理工作空间，无需手动删除
