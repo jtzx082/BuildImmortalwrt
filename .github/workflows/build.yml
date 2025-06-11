@@ -1,0 +1,154 @@
+name: Optimized ImmortalWrt Build
+
+concurrency: 
+  group: build-${{ github.ref }}
+  cancel-in-progress: true  # 自动取消重复构建[6](@ref)
+
+on: workflow_dispatch
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120  # 防止构建过程卡死[7](@ref)
+    env:
+      IMAGEBUILDER_URL: "https://downloads.immortalwrt.org/releases/24.10.1/targets/x86/64/immortalwrt-imagebuilder-24.10.1-x86-64.Linux-x86_64.tar.zst"
+      IMAGEBUILDER_ARCHIVE: "immortalwrt-imagebuilder-24.10.1-x86-64.Linux-x86_64.tar.zst"
+      IMAGEBUILDER_DIR: "immortalwrt-imagebuilder-24.10.1-x86-64.Linux-x86_64"
+      SOFTS_DIR: "softs"
+      PLUGINS_FILE: "plugins.list"
+      OUTPUT_DIR: "output"
+      IMAGE_SIZE: "4096MB"  # 进一步增大固件空间[7](@ref)
+      ROOTFS_SIZE: "4096"   # 增大根文件系统大小
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    # 1. APT包缓存优化[1](@ref)[9](@ref)
+    - name: Cache APT packages
+      uses: actions/cache@v4
+      id: apt-cache
+      with:
+        path: |
+          /var/cache/apt/archives
+          /var/lib/apt/lists
+        key: ${{ runner.os }}-apt-${{ hashFiles('.github/workflows/dependencies.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-apt-
+
+    - name: Install dependencies
+      run: |
+        sudo apt update -y
+        # 从文件读取依赖列表，便于维护和缓存[1](@ref)
+        sudo xargs -a .github/workflows/dependencies.txt apt install -y
+
+    # 2. ImageBuilder缓存优化[9](@ref)
+    - name: Cache ImageBuilder
+      uses: actions/cache@v4
+      id: cache-imagebuilder
+      with:
+        path: |
+          ${{ env.IMAGEBUILDER_ARCHIVE }}
+          ${{ env.IMAGEBUILDER_DIR }}
+        key: ${{ runner.os }}-imagebuilder-${{ hashFiles(env.IMAGEBUILDER_URL) }}
+        restore-keys: |
+          ${{ runner.os }}-imagebuilder-
+
+    - name: Download ImmortalWrt ImageBuilder
+      if: steps.cache-imagebuilder.outputs.cache-hit != 'true'
+      run: |
+        wget $IMAGEBUILDER_URL
+        tar -I zstd -xf $IMAGEBUILDER_ARCHIVE
+
+    - name: Prepare custom IPK packages
+      run: |
+        mkdir -p $IMAGEBUILDER_DIR/packages/custom
+        if [ -d "$SOFTS_DIR" ]; then
+          find "$SOFTS_DIR" -type f -name "*.ipk" -exec cp -v {} "$IMAGEBUILDER_DIR/packages/custom/" \;
+        fi
+        echo "==== Copied IPK files ===="
+        ls -lh $IMAGEBUILDER_DIR/packages/custom/
+
+    # 3. 并行解析插件列表[7](@ref)
+    - name: Parse plugins and packages
+      id: get_pkgs
+      run: |
+        # 安装GNU parallel用于并行处理
+        sudo apt install -y parallel
+
+        # 解析plugins.list（使用并行处理加速）
+        BASE_PKGS=""
+        if [ -f "$PLUGINS_FILE" ]; then
+          BASE_PKGS=$(grep -vE '^\s*#|^\s*$' "$PLUGINS_FILE" | parallel -j $(nproc) echo {} | tr '\n' ' ')
+        fi
+
+        # 获取所有自定义IPK的包名
+        CUSTOM_PKGS=""
+        if [ -d "$IMAGEBUILDER_DIR/packages/custom" ]; then
+          for ipk in "$IMAGEBUILDER_DIR/packages/custom/"*.ipk; do
+            [ -e "$ipk" ] || continue
+            pkgname=$(basename "$ipk" | awk -F_ '{print $1}')
+            CUSTOM_PKGS="$CUSTOM_PKGS $pkgname"
+          done
+        fi
+
+        # 合并所有包并去重
+        ALL_PKGS=$(echo "$BASE_PKGS $CUSTOM_PKGS" | tr ' ' '\n' | sort -u | xargs)
+        
+        echo "Base packages: $BASE_PKGS"
+        echo "Custom IPK packages: $CUSTOM_PKGS"
+        echo "All packages: $ALL_PKGS"
+        
+        # 写入环境变量
+        echo "FINAL_PKGS=$ALL_PKGS" >> $GITHUB_ENV
+
+    # 4. 构建过程优化（增加线程数）[7](@ref)
+    - name: Build firmware with increased space
+      run: |
+        set -euxo pipefail  # 启用严格错误检测[7](@ref)
+        cd $IMAGEBUILDER_DIR
+        # 增加根文件系统大小配置
+        echo "CONFIG_TARGET_ROOTFS_PARTSIZE=$ROOTFS_SIZE" >> .config
+        
+        # 构建固件（使用双倍线程加速）
+        make -j $(($(nproc)*2)) image \
+          PACKAGES="$FINAL_PKGS" \
+          FILES=../files \
+          IMAGE_SIZE="$IMAGE_SIZE"
+          
+        mkdir -p ../$OUTPUT_DIR
+        cp -v bin/targets/x86/64/* ../$OUTPUT_DIR/
+
+    - name: Upload firmware to Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: immortalwrt-x86-64
+        path: ${{ env.OUTPUT_DIR }}
+
+    - name: Generate release tag
+      id: release_tag
+      run: |
+        echo "tag=auto-build-$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ steps.release_tag.outputs.tag }}
+        name: "ImmortalWrt x86_64 Firmware ${{ steps.release_tag.outputs.tag }}"
+        body: |
+          This is an automated build of ImmortalWrt x86_64 firmware.
+          Includes:
+          - Base packages: `${{ env.FINAL_PKGS }}`
+          - Custom IPKs from softs directory
+        files: ${{ env.OUTPUT_DIR }}/*
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    # 5. 资源清理[7](@ref)
+    - name: Clean up
+      if: always()  # 无论成功失败都执行清理
+      run: |
+        rm -rf ${{ env.IMAGEBUILDER_DIR }}
+        rm -f ${{ env.IMAGEBUILDER_ARCHIVE }}
