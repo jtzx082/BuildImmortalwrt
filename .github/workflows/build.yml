@@ -17,8 +17,8 @@ jobs:
       SOFTS_DIR: "softs"
       PLUGINS_FILE: "plugins.list"
       OUTPUT_DIR: "output"
-      IMAGE_SIZE: "2048MB"  # 恢复为2GB避免空间问题
-      ROOTFS_SIZE: "2048"
+      IMAGE_SIZE: "4096MB"
+      ROOTFS_SIZE: "4096"
 
     steps:
     - name: Checkout repository
@@ -26,6 +26,7 @@ jobs:
       with:
         fetch-depth: 0
 
+    # 修复1：使用正确的依赖文件路径
     - name: Cache APT packages
       uses: actions/cache@v4
       id: apt-cache
@@ -41,7 +42,13 @@ jobs:
       run: |
         sudo apt update -y
         sudo xargs -a dependencies.txt apt install -y
-        sudo timedatectl set-ntp on  # 同步时间解决时间戳问题[8](@ref)
+        sudo timedatectl set-ntp on  # 同步时间解决时间戳问题
+
+    # 修复2：替换无效的hash()函数
+    - name: Create URL hash for caching
+      id: url-hash
+      run: |
+        echo "url_hash=$(echo $IMAGEBUILDER_URL | sha256sum | cut -d' ' -f1)" >> $GITHUB_OUTPUT
 
     - name: Cache ImageBuilder
       uses: actions/cache@v4
@@ -50,7 +57,7 @@ jobs:
         path: |
           ${{ env.IMAGEBUILDER_ARCHIVE }}
           ${{ env.IMAGEBUILDER_DIR }}
-        key: ${{ runner.os }}-imagebuilder-${{ hash(env.IMAGEBUILDER_URL) }}
+        key: ${{ runner.os }}-imagebuilder-${{ steps.url-hash.outputs.url_hash }}
         restore-keys: |
           ${{ runner.os }}-imagebuilder-
 
@@ -58,7 +65,6 @@ jobs:
       if: steps.cache-imagebuilder.outputs.cache-hit != 'true'
       run: |
         wget $IMAGEBUILDER_URL
-        # 添加-P参数处理绝对路径[7](@ref)
         tar -I zstd -xPf $IMAGEBUILDER_ARCHIVE --no-overwrite-dir
 
     - name: Prepare custom IPK packages
@@ -97,21 +103,18 @@ jobs:
         cd $IMAGEBUILDER_DIR
         echo "CONFIG_TARGET_ROOTFS_PARTSIZE=$ROOTFS_SIZE" >> .config
         
-        # 添加sudo解决权限问题[8](@ref)
         sudo make -j $(($(nproc))) image \
           PACKAGES="$FINAL_PKGS" \
           FILES=../files \
           IMAGE_SIZE="$IMAGE_SIZE"
         
         mkdir -p ../$OUTPUT_DIR
-        # 添加-P参数处理绝对路径[7](@ref)
         sudo cp -Pv bin/targets/x86/64/* ../$OUTPUT_DIR/
 
     - name: Verify firmware files
       run: |
         echo "==== Firmware files ===="
         ls -lh ${{ env.OUTPUT_DIR }}
-        # 检查文件完整性[6](@ref)
         for file in ${{ env.OUTPUT_DIR }}/*; do
           if [[ $file == *.tar.gz ]]; then
             tar -tzf "$file" >/dev/null || echo "⚠️ Corrupted file: $file"
