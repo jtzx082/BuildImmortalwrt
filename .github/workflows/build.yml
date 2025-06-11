@@ -31,21 +31,20 @@ jobs:
         sudo apt update -y
         sudo xargs -a dependencies.txt apt install -y
         sudo timedatectl set-ntp on
+        # 关键修复1：确保安装最新版zstd[3](@ref)[4](@ref)
+        sudo apt install -y zstd
 
-    # 修复1：确保缓存目录存在
     - name: Create cache directories
       run: |
         mkdir -p ${{ env.IMAGEBUILDER_DIR }}
         touch ${{ env.IMAGEBUILDER_ARCHIVE }}
 
-    # 修复2：优化URL哈希生成
     - name: Create URL hash for caching
       id: url-hash
       run: |
         HASH=$(echo -n "$IMAGEBUILDER_URL" | sha256sum | awk '{print $1}')
         echo "url_hash=$HASH" >> $GITHUB_OUTPUT
 
-    # 修复3：缓存路径验证（关键修复）
     - name: Cache ImageBuilder
       uses: actions/cache@v4
       id: cache-imagebuilder
@@ -57,11 +56,30 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-imagebuilder-
 
-    - name: Download ImmortalWrt ImageBuilder
+    # 关键修复2：增强下载和解压可靠性[3](@ref)[4](@ref)[7](@ref)
+    - name: Download and extract ImmortalWrt ImageBuilder
       if: steps.cache-imagebuilder.outputs.cache-hit != 'true'
       run: |
-        wget -q --show-progress $IMAGEBUILDER_URL
-        tar -I zstd -xPf $IMAGEBUILDER_ARCHIVE --no-overwrite-dir
+        # 使用续传和重试机制
+        wget -q --show-progress --continue --tries=3 --waitretry=10 $IMAGEBUILDER_URL
+        
+        # 添加文件完整性检查
+        echo "Verifying archive integrity..."
+        if ! zstd -t "$IMAGEBUILDER_ARCHIVE"; then
+          echo "::error::Downloaded file is corrupted, removing..."
+          rm -f "$IMAGEBUILDER_ARCHIVE"
+          exit 1
+        fi
+        
+        # 使用两步解压法提高兼容性[4](@ref)
+        echo "Decompressing with zstd..."
+        zstd -d "$IMAGEBUILDER_ARCHIVE" -o "${IMAGEBUILDER_ARCHIVE%.zst}"
+        
+        echo "Extracting tar archive..."
+        tar -xPf "${IMAGEBUILDER_ARCHIVE%.zst}" --no-overwrite-dir
+        
+        # 清理中间文件
+        rm -f "${IMAGEBUILDER_ARCHIVE%.zst}"
 
     - name: Prepare custom IPK packages
       run: |
@@ -139,6 +157,3 @@ jobs:
         files: ${{ env.OUTPUT_DIR }}/*
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-    # 修复4：移除清理步骤（避免缓存前删除文件）
-    # 注意：GitHub Runner会自动清理工作空间，无需手动删除
