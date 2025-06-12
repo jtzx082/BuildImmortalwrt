@@ -8,7 +8,7 @@ on: workflow_dispatch
 
 jobs:
   build:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
       IMAGEBUILDER_URL: "https://downloads.immortalwrt.org/releases/24.10.1/targets/x86/64/immortalwrt-imagebuilder-24.10.1-x86-64.Linux-x86_64.tar.zst"
