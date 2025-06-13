@@ -1,0 +1,175 @@
+name: Build ImmortalWrt Firmware
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      IMAGEBUILDER_URL: "https://downloads.immortalwrt.org/releases/24.10.1/targets/x86/64/immortalwrt-imagebuilder-24.10.1-x86-64.Linux-x86_64.tar.zst"
+      IMAGEBUILDER_ARCHIVE: "immortalwrt-imagebuilder-24.10.1-x86-64.Linux-x86_64.tar.zst"
+      IMAGEBUILDER_DIR: "immortalwrt-imagebuilder-24.10.1-x86-64.Linux-x86_64"
+      SOFTS_DIR: "softs"
+      PLUGINS_FILE: "plugins.list"
+      OUTPUT_DIR: "output"
+      IMAGE_SIZE: "2048MB"
+      ROOTFS_SIZE: "2048"
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Install dependencies
+      run: |
+        sudo apt update -y
+        sudo apt install -y \
+          build-essential ccache cmake curl flex gawk gettext git \
+          libncurses-dev libssl-dev python3 python3-pip rsync unzip \
+          wget zlib1g-dev zstd p7zip-full jq
+        
+        # 仅安装必要依赖项，减少不必要组件
+        echo "精简后的依赖安装完成"
+
+    - name: Download and extract ImageBuilder
+      run: |
+        # 增加重试机制和错误检查
+        if ! wget --tries=3 --waitretry=30 --retry-connrefused "$IMAGEBUILDER_URL"; then
+          echo "❌ 下载失败: $IMAGEBUILDER_URL" >&2
+          exit 1
+        fi
+        
+        if ! command -v zstd &> /dev/null; then
+          sudo apt install -y zstd
+        fi
+        
+        if ! tar -I zstd -xf "$IMAGEBUILDER_ARCHIVE"; then
+          echo "❌ 解压失败: $IMAGEBUILDER_ARCHIVE" >&2
+          exit 1
+        fi
+        
+        # 验证目录是否存在
+        if [ ! -d "$IMAGEBUILDER_DIR" ]; then
+          echo "❌ 目录不存在: $IMAGEBUILDER_DIR" >&2
+          exit 1
+        fi
+
+    - name: Prepare custom IPK packages
+      run: |
+        mkdir -p "$IMAGEBUILDER_DIR/packages/custom"
+        
+        if [ -d "$SOFTS_DIR" ]; then
+          # 使用find + xargs更安全的处理文件名
+          if [ -n "$(find "$SOFTS_DIR" -name '*.ipk' -print -quit)" ]; then
+            find "$SOFTS_DIR" -name '*.ipk' -print0 | xargs -0 -I {} cp -v {} "$IMAGEBUILDER_DIR/packages/custom/"
+            echo "✅ 已复制 $(find "$SOFTS_DIR" -name '*.ipk' | wc -l) 个IPK文件"
+          else
+            echo "⚠️ 没有找到IPK文件，跳过自定义包"
+          fi
+        else
+          echo "⚠️ softs目录不存在，跳过自定义包"
+        fi
+
+    - name: Parse plugins and packages
+      id: get_pkgs
+      run: |
+        # 安全读取插件列表
+        BASE_PKGS=""
+        if [[ -f "$PLUGINS_FILE" ]]; then
+          # 过滤注释和空行，删除尾部空格
+          BASE_PKGS=$(grep -vE '^#|^\s*$' "$PLUGINS_FILE" | sed 's/#.*//' | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+          echo "从 $PLUGINS_FILE 读取基础包: $BASE_PKGS"
+        else
+          echo "⚠️ $PLUGINS_FILE 不存在，使用空基础包"
+        fi
+
+        # 获取自定义IPK包名
+        CUSTOM_PKGS=""
+        if [[ -d "$IMAGEBUILDER_DIR/packages/custom" ]]; then
+          for ipk in "$IMAGEBUILDER_DIR/packages/custom/"*.ipk; do
+            [[ -e "$ipk" ]] || continue
+            # 更安全的包名提取方式
+            pkgname=$(basename "$ipk" | awk -F_ '{print $1}')
+            [[ -n "$pkgname" ]] && CUSTOM_PKGS+=" $pkgname"
+          done
+          CUSTOM_PKGS=$(echo "$CUSTOM_PKGS" | xargs)  # 去除多余空格
+          echo "自定义IPK包: $CUSTOM_PKGS"
+        fi
+
+        # 合并并去重
+        ALL_PKGS=$(echo "$BASE_PKGS $CUSTOM_PKGS" | tr ' ' '\n' | awk '!x[$0]++' | xargs)
+        
+        # 验证包列表非空
+        if [[ -z "$ALL_PKGS" ]]; then
+          echo "⚠️ 最终包列表为空，将使用默认配置"
+          ALL_PKGS=" "  # 传递空字符串
+        fi
+        
+        echo "最终包列表: $ALL_PKGS"
+        echo "FINAL_PKGS=$ALL_PKGS" >> $GITHUB_ENV
+
+    - name: Build firmware
+      run: |
+        cd "$IMAGEBUILDER_DIR" || exit 1
+        
+        # 确保配置文件存在
+        touch .config
+        echo "CONFIG_TARGET_ROOTFS_PARTSIZE=$ROOTFS_SIZE" >> .config
+        
+        # 添加构建日志时间戳
+        echo "==== 开始构建 [$(date '+%Y-%m-%d %H:%M:%S')] ===="
+        
+        # 使用详细日志和错误检查
+        set -x
+        make image \
+          PACKAGES="$FINAL_PKGS" \
+          FILES=../files \
+          IMAGE_SIZE="$IMAGE_SIZE" \
+          V=s -j$(($(nproc) + 1))
+        set +x
+        
+        # 检查构建结果
+        if ! ls bin/targets/x86/64/*.img.gz >/dev/null 2>&1; then
+          echo "❌ 构建失败：未找到固件文件" >&2
+          exit 1
+        fi
+        
+        mkdir -p "../$OUTPUT_DIR"
+        cp -v bin/targets/x86/64/* "../$OUTPUT_DIR/"
+        echo "✅ 固件已保存到: ../$OUTPUT_DIR"
+
+    - name: Upload firmware artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: immortalwrt-x86-64
+        path: ${{ env.OUTPUT_DIR }}
+        retention-days: 3
+
+    - name: Generate release tag
+      id: release_tag
+      run: |
+        tag="auto-build-$(date -u +'%Y%m%d-%H%M%S')"
+        echo "tag=$tag" >> $GITHUB_OUTPUT
+        echo "::notice::生成发布标签: $tag"
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      if: success()
+      with:
+        tag_name: ${{ steps.release_tag.outputs.tag }}
+        name: "ImmortalWrt x86_64 [${{ steps.release_tag.outputs.tag }}]"
+        body: |
+          ### 自动化构建结果
+          **构建时间:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')
+          **包含包:**
+          ```plaintext
+          ${{ env.FINAL_PKGS }}
+          ```
+          [查看完整日志](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+        files: ${{ env.OUTPUT_DIR }}/*
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
