@@ -9,7 +9,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04  # ✅ 修复：使用支持 opkg-utils 的 LTS 版本
     timeout-minutes: 180
 
     env:
@@ -32,8 +32,7 @@ jobs:
       run: |
         sudo apt update -y
         sudo apt install -y curl zstd pv opkg-utils
-        which opkg-make-index || echo "⚠️ opkg-make-index 未找到，跳过索引构建"
-
+        
     - name: Cache ImageBuilder
       uses: actions/cache@v4
       id: cache
