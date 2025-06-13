@@ -1,4 +1,4 @@
-name: Stable ImmortalWrt Build with Download Verification
+name: Stable ImmortalWrt Build
 
 concurrency:
   group: build-${{ github.ref }}
@@ -32,7 +32,7 @@ jobs:
       run: |
         sudo apt update -y
         sudo apt install -y curl zstd pv opkg-utils
-        which opkg-make-index || echo "❌ opkg-make-index 未找到！"
+        which opkg-make-index || echo "⚠️ opkg-make-index 未找到，跳过索引构建"
 
     - name: Cache ImageBuilder
       uses: actions/cache@v4
@@ -43,21 +43,18 @@ jobs:
           ${{ env.IMAGEBUILDER_DIR }}
         key: ${{ runner.os }}-immortal-${{ env.IMAGEBUILDER_URL }}
 
-    - name: Download & verify ImageBuilder
+    - name: Download & extract ImageBuilder
       if: steps.cache.outputs.cache-hit != 'true'
       run: |
         set -euxo pipefail
         curl --fail --retry 5 --retry-delay 10 -L $IMAGEBUILDER_URL -o $IMAGEBUILDER_ARCHIVE
-        file $IMAGEBUILDER_ARCHIVE
         zstd -t $IMAGEBUILDER_ARCHIVE
         zstd -d -c $IMAGEBUILDER_ARCHIVE | tar -x --no-overwrite-dir -f -
         mv *-x86_64.Linux-x86_64 $IMAGEBUILDER_DIR
-        ls -lR $IMAGEBUILDER_DIR | head -n 20
 
     - name: Validate cached ImageBuilder
       if: steps.cache.outputs.cache-hit == 'true'
       run: |
-        set -eux
         test -d ${{ env.IMAGEBUILDER_DIR }}/bin -a -f ${{ env.IMAGEBUILDER_DIR }}/Makefile
 
     - name: Fix permissions
@@ -74,7 +71,7 @@ jobs:
     - name: Prepare package list
       id: pkg
       run: |
-        BASE="$(grep -vE '^\s*(#|$)' plugins.list || echo)"
+        BASE="$(grep -vE '^\s*(#|$)' $PLUGINS_FILE || echo)"
         CUSTOM="$(cd $IMAGEBUILDER_DIR/packages/custom && ls *.ipk 2>/dev/null | sed 's/_.*//')"
         ALL="$(echo $BASE $CUSTOM | tr ' ' '\n' | sort -u | xargs)"
         echo "FINAL_PKGS=$ALL" >> $GITHUB_ENV
@@ -85,23 +82,23 @@ jobs:
         set -euxo pipefail
         cd $IMAGEBUILDER_DIR
         echo "CONFIG_TARGET_ROOTFS_PARTSIZE=${ROOTFS_SIZE}" >> .config
-        make package/index
-        make -j$(nproc) image PACKAGES="$FINAL_PKGS" FILES=../files IMAGE_SIZE="$IMAGE_SIZE"
+        make -j$(nproc) image \
+          PACKAGES="$FINAL_PKGS" \
+          FILES=../files \
+          IMAGE_SIZE="$IMAGE_SIZE"
         mkdir -p ../$OUTPUT_DIR
         cp -v bin/targets/x86/64/* ../$OUTPUT_DIR/
 
-    - name: Clean temp files
+    - name: Clean build garbage
       run: |
         cd $IMAGEBUILDER_DIR
         make clean
         rm -rf staging_dir/ build_dir/ tmp/
 
-    - name: Inspect output
+    - name: List firmware
       run: |
+        echo "输出文件："
         ls -lh $OUTPUT_DIR
-        for f in $OUTPUT_DIR/*; do
-          tar -tzf "$f" >/dev/null || echo "⚠️ 可能损坏：$f"
-        done
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
@@ -109,9 +106,10 @@ jobs:
         name: immortalwrt-firmware
         path: $OUTPUT_DIR
 
-    - name: Create release
+    - name: Create tag
       id: tagger
-      run: echo "tag=build-$(date +'%Y%m%d-%H%M')" >> $GITHUB_OUTPUT
+      run: |
+        echo "tag=build-$(date +'%Y%m%d-%H%M')" >> $GITHUB_OUTPUT
 
     - name: Publish release
       uses: softprops/action-gh-release@v1
@@ -119,8 +117,8 @@ jobs:
         tag_name: ${{ steps.tagger.outputs.tag }}
         name: "ImmortalWrt Build ${{ steps.tagger.outputs.tag }}"
         body: |
-          • Packages: ${{ env.FINAL_PKGS }}
-          • Custom IPKs: $(ls $IMAGEBUILDER_DIR/packages/custom || echo "None")
+          • 包含插件: ${{ env.FINAL_PKGS }}
+          • 自定义 IPK：$(ls $IMAGEBUILDER_DIR/packages/custom || echo "None")
         files: $OUTPUT_DIR/*
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
