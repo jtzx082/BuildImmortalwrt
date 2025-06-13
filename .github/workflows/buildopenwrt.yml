@@ -1,4 +1,4 @@
-name: Optimized ImmortalWrt Build
+name: Optimized ImmortalWrt Build优化
 
 concurrency: 
   group: build-${{ github.ref }}
