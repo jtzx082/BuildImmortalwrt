@@ -1,4 +1,4 @@
-name: Optimized ImmortalWrt Build优化
+name: Optimized ImmortalWrt Build
 
 concurrency: 
   group: build-${{ github.ref }}
@@ -31,7 +31,6 @@ jobs:
         sudo apt update -y
         sudo xargs -a dependencies.txt apt install -y
         sudo timedatectl set-ntp on
-        # 关键修复：添加缺失的32位库依赖
         sudo apt install -y zstd pv rsync coreutils libc6-i386 lib32stdc++6
         
     - name: Create URL hash for caching
@@ -66,12 +65,15 @@ jobs:
         zstd -d -c $IMAGEBUILDER_ARCHIVE | tar -xvf - --no-overwrite-dir
         find $IMAGEBUILDER_DIR -type f | head -5 | xargs -I{} ls -lh {}
 
+    # ========= 关键修复区域 =========
     - name: Fix directory permissions
       run: |
         sudo chown -R $USER:$USER ${{ env.IMAGEBUILDER_DIR }}
         find ${{ env.IMAGEBUILDER_DIR }} -type d -exec chmod 755 {} \;
-        # 关键修复：确保所有工具可执行
-        find ${{ env.IMAGEBUILDER_DIR }}/staging_dir/host/bin -type f -exec chmod +x {} \;
+        # 修复1：仅当目录存在时才修改权限[1](@ref)
+        if [ -d "${{ env.IMAGEBUILDER_DIR }}/staging_dir/host/bin" ]; then
+          find ${{ env.IMAGEBUILDER_DIR }}/staging_dir/host/bin -type f -exec chmod +x {} \;
+        fi
 
     - name: Prepare custom IPK packages
       run: |
@@ -81,12 +83,14 @@ jobs:
         fi
         sudo chown -R $USER:$USER $IMAGEBUILDER_DIR/packages/custom
 
-    # ========= 关键修复区域开始 =========
     - name: Precompile host tools
-      run: |  # 关键修复：预编译usign等工具[9](@ref)
+      run: |  # 修复2：确保工具目录生成[4](@ref)[6](@ref)
         cd ${{ env.IMAGEBUILDER_DIR }}
         make -j $(nproc) tools/install
         make -j $(nproc) toolchain/install
+        # 修复后权限设置
+        find staging_dir/host/bin -type f -exec chmod +x {} \;
+    # ===============================
 
     - name: Initialize package index
       run: |
@@ -94,21 +98,17 @@ jobs:
         mkdir -p keys
         touch keys/secret.key
         
-        # 关键修复：设置环境变量绕过权限检查
         export FORCE_UNSAFE_CONFIGURE=1
         export PKG_HASH=skip
         
-        # 使用详细日志模式
         make package_index V=s 2>&1 | tee build.log
         
-        # 增强错误检测
         if ! grep -q "package index generated" build.log; then
           echo "❌ 包索引生成失败 - 详细错误:"
           grep -i "error\|fail" build.log || true
           exit 1
         fi
         echo "✅ 包索引成功生成"
-    # ========= 关键修复区域结束 =========
 
     - name: Cache package index
       uses: actions/cache@v4
@@ -141,7 +141,6 @@ jobs:
         set -euxo pipefail
         cd $IMAGEBUILDER_DIR
         
-        # 实时监控磁盘空间
         while true; do
           df -h .
           sleep 30
@@ -150,7 +149,6 @@ jobs:
         
         echo "CONFIG_TARGET_ROOTFS_PARTSIZE=$ROOTFS_SIZE" >> .config
         
-        # 关键修复：设置环境变量绕过权限检查
         export FORCE_UNSAFE_CONFIGURE=1
         export PKG_HASH=skip
         
