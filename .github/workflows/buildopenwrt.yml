@@ -70,10 +70,8 @@ jobs:
       run: |
         sudo chown -R $USER:$USER ${{ env.IMAGEBUILDER_DIR }}
         find ${{ env.IMAGEBUILDER_DIR }} -type d -exec chmod 755 {} \;
-        # 修复1：仅当目录存在时才修改权限[1](@ref)
-        if [ -d "${{ env.IMAGEBUILDER_DIR }}/staging_dir/host/bin" ]; then
-          find ${{ env.IMAGEBUILDER_DIR }}/staging_dir/host/bin -type f -exec chmod +x {} \;
-        fi
+        # 修复1：跳过不存在的工具编译
+        echo "跳过预编译步骤 - ImageBuilder已包含完整工具链"
 
     - name: Prepare custom IPK packages
       run: |
@@ -83,17 +81,8 @@ jobs:
         fi
         sudo chown -R $USER:$USER $IMAGEBUILDER_DIR/packages/custom
 
-    - name: Precompile host tools
-      run: |  # 修复2：确保工具目录生成[4](@ref)[6](@ref)
-        cd ${{ env.IMAGEBUILDER_DIR }}
-        make -j $(nproc) tools/install
-        make -j $(nproc) toolchain/install
-        # 修复后权限设置
-        find staging_dir/host/bin -type f -exec chmod +x {} \;
-    # ===============================
-
     - name: Initialize package index
-      run: |
+      run: |  # 修复2：直接生成包索引
         cd ${{ env.IMAGEBUILDER_DIR }}
         mkdir -p keys
         touch keys/secret.key
@@ -101,6 +90,7 @@ jobs:
         export FORCE_UNSAFE_CONFIGURE=1
         export PKG_HASH=skip
         
+        # 直接生成包索引（无需预编译）
         make package_index V=s 2>&1 | tee build.log
         
         if ! grep -q "package index generated" build.log; then
@@ -109,6 +99,7 @@ jobs:
           exit 1
         fi
         echo "✅ 包索引成功生成"
+    # ===============================
 
     - name: Cache package index
       uses: actions/cache@v4
