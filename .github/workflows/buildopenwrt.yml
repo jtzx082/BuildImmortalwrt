@@ -30,9 +30,8 @@ jobs:
       run: |
         sudo apt update -y
         sudo xargs -a dependencies.txt apt install -y
-        sudo timedatectl set-ntp on
-        # 关键修复：安装opkg-utils解决索引生成问题
         sudo apt install -y zstd pv opkg-utils
+        which opkg-make-index || echo "❌ opkg-make-index 未找到！"
 
     - name: Create URL hash for caching
       id: url-hash
@@ -60,8 +59,6 @@ jobs:
     - name: Download and extract ImmortalWrt ImageBuilder
       if: steps.cache-imagebuilder.outputs.cache-hit != 'true'
       run: |
-        FREE_SPACE=$(df -h . | awk 'NR==2 {print $4}')
-        echo "可用磁盘空间: $FREE_SPACE"
         wget -q --show-progress --continue --tries=3 --waitretry=10 $IMAGEBUILDER_URL
         zstd -d -c $IMAGEBUILDER_ARCHIVE | tar -xvf - --no-overwrite-dir
         find $IMAGEBUILDER_DIR -type f | head -5 | xargs -I{} ls -lh {}
@@ -103,26 +100,16 @@ jobs:
       run: |
         set -euxo pipefail
         cd $IMAGEBUILDER_DIR
-        
-        # 磁盘空间监控
-        while true; do
-          df -h .
-          sleep 30
-        done &
-        DISK_MONITOR_PID=$!
-        
         echo "CONFIG_TARGET_ROOTFS_PARTSIZE=$ROOTFS_SIZE" >> .config
-        
-        # 关键修复：先更新包索引再构建
-        make package/index || true
-        
-        make -j $(($(nproc))) image \
+
+        # 尝试构建 package index，如果失败输出提示
+        make package/index || echo "⚠️ make package/index 失败，可能 opkg-utils 缺失或格式不兼容"
+
+        make -j$(nproc) image \
           PACKAGES="$FINAL_PKGS" \
           FILES=../files \
           IMAGE_SIZE="$IMAGE_SIZE"
-        
-        kill $DISK_MONITOR_PID
-        
+
         mkdir -p ../$OUTPUT_DIR
         cp -Pv bin/targets/x86/64/* ../$OUTPUT_DIR/
 
