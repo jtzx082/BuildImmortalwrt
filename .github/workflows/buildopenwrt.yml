@@ -31,8 +31,9 @@ jobs:
         sudo apt update -y
         sudo xargs -a dependencies.txt apt install -y
         sudo timedatectl set-ntp on
-        sudo apt install -y zstd pv rsync coreutils  # 关键修复：添加rsync和coreutils[7](@ref)[9](@ref)
-
+        # 关键修复：添加缺失的32位库依赖
+        sudo apt install -y zstd pv rsync coreutils libc6-i386 lib32stdc++6
+        
     - name: Create URL hash for caching
       id: url-hash
       run: |
@@ -69,31 +70,51 @@ jobs:
       run: |
         sudo chown -R $USER:$USER ${{ env.IMAGEBUILDER_DIR }}
         find ${{ env.IMAGEBUILDER_DIR }} -type d -exec chmod 755 {} \;
+        # 关键修复：确保所有工具可执行
+        find ${{ env.IMAGEBUILDER_DIR }}/staging_dir/host/bin -type f -exec chmod +x {} \;
 
     - name: Prepare custom IPK packages
       run: |
-        mkdir -p $IMAGEBUILDER_DIR/packages/custom/base  # 修复目录结构[9](@ref)
+        mkdir -p $IMAGEBUILDER_DIR/packages/custom/base
         if [ -d "$SOFTS_DIR" ]; then
           find "$SOFTS_DIR" -type f -name "*.ipk" -exec cp -v {} "$IMAGEBUILDER_DIR/packages/custom/base/" \;
         fi
         sudo chown -R $USER:$USER $IMAGEBUILDER_DIR/packages/custom
 
     # ========= 关键修复区域开始 =========
+    - name: Precompile host tools
+      run: |  # 关键修复：预编译usign等工具[9](@ref)
+        cd ${{ env.IMAGEBUILDER_DIR }}
+        make -j $(nproc) tools/install
+        make -j $(nproc) toolchain/install
+
     - name: Initialize package index
       run: |
         cd ${{ env.IMAGEBUILDER_DIR }}
         mkdir -p keys
-        touch keys/secret.key  # 创建空密钥文件避免报错
-        make package_index V=s 2>&1 | tee build.log  # 显式生成索引[9](@ref)
-        grep "package index generated" build.log || (echo "❌ 包索引生成失败"; exit 1)
+        touch keys/secret.key
+        
+        # 关键修复：设置环境变量绕过权限检查
+        export FORCE_UNSAFE_CONFIGURE=1
+        export PKG_HASH=skip
+        
+        # 使用详细日志模式
+        make package_index V=s 2>&1 | tee build.log
+        
+        # 增强错误检测
+        if ! grep -q "package index generated" build.log; then
+          echo "❌ 包索引生成失败 - 详细错误:"
+          grep -i "error\|fail" build.log || true
+          exit 1
+        fi
         echo "✅ 包索引成功生成"
+    # ========= 关键修复区域结束 =========
 
     - name: Cache package index
       uses: actions/cache@v4
       with:
         path: ${{ env.IMAGEBUILDER_DIR }}/bin/packages
-        key: ${{ runner.os }}-packages-${{ hashFiles('plugins.list') }}  # 缓存索引[8](@ref)
-    # ========= 关键修复区域结束 =========
+        key: ${{ runner.os }}-packages-${{ hashFiles('plugins.list') }}
 
     - name: Parse plugins and packages
       id: get_pkgs
@@ -129,11 +150,11 @@ jobs:
         
         echo "CONFIG_TARGET_ROOTFS_PARTSIZE=$ROOTFS_SIZE" >> .config
         
-        # 关键修复：设置环境变量绕过权限检查[9](@ref)
+        # 关键修复：设置环境变量绕过权限检查
         export FORCE_UNSAFE_CONFIGURE=1
         export PKG_HASH=skip
         
-        make -j $(($(nproc))) V=sc image \  # 增加详细日志
+        make -j $(($(nproc))) V=sc image \
           PACKAGES="$FINAL_PKGS" \
           FILES=../files \
           IMAGE_SIZE="$IMAGE_SIZE"
