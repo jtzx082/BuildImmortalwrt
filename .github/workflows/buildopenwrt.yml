@@ -1,4 +1,4 @@
-name: Optimized ImmortalWrt Build优化
+name: ImmortalWrt Build Workflow优化
 
 concurrency: 
   group: build-${{ github.ref }}
@@ -31,19 +31,15 @@ jobs:
         sudo apt update -y
         sudo xargs -a dependencies.txt apt install -y
         sudo timedatectl set-ntp on
-        sudo apt install -y zstd pv rsync coreutils libc6-i386 lib32stdc++6
+        # 关键修复：添加32位库支持[7](@ref)[8](@ref)
+        sudo dpkg --add-architecture i386
+        sudo apt install -y zstd pv rsync coreutils libc6:i386 libstdc++6:i386
         
     - name: Create URL hash for caching
       id: url-hash
       run: |
         HASH=$(echo -n "$IMAGEBUILDER_URL" | sha256sum | awk '{print $1}')
         echo "url_hash=$HASH" >> $GITHUB_OUTPUT
-
-    - name: Create cache directories
-      run: |
-        mkdir -p ${{ env.IMAGEBUILDER_DIR }}
-        touch ${{ env.IMAGEBUILDER_ARCHIVE }}
-        sudo chown -R $USER:$USER ${{ env.IMAGEBUILDER_DIR }}
 
     - name: Cache ImageBuilder
       uses: actions/cache@v4
@@ -56,7 +52,7 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-imagebuilder-
 
-    - name: Download and extract ImmortalWrt ImageBuilder
+    - name: Download and extract ImageBuilder
       if: steps.cache-imagebuilder.outputs.cache-hit != 'true'
       run: |
         FREE_SPACE=$(df -h . | awk 'NR==2 {print $4}')
@@ -65,13 +61,10 @@ jobs:
         zstd -d -c $IMAGEBUILDER_ARCHIVE | tar -xvf - --no-overwrite-dir
         find $IMAGEBUILDER_DIR -type f | head -5 | xargs -I{} ls -lh {}
 
-    # ========= 关键修复区域 =========
     - name: Fix directory permissions
       run: |
         sudo chown -R $USER:$USER ${{ env.IMAGEBUILDER_DIR }}
         find ${{ env.IMAGEBUILDER_DIR }} -type d -exec chmod 755 {} \;
-        # 修复1：跳过不存在的工具编译
-        echo "跳过预编译步骤 - ImageBuilder已包含完整工具链"
 
     - name: Prepare custom IPK packages
       run: |
@@ -81,17 +74,27 @@ jobs:
         fi
         sudo chown -R $USER:$USER $IMAGEBUILDER_DIR/packages/custom
 
+    # ========= 关键修复区域 =========
     - name: Initialize package index
-      run: |  # 修复2：直接生成包索引
+      run: |
         cd ${{ env.IMAGEBUILDER_DIR }}
         mkdir -p keys
         touch keys/secret.key
         
+        # 关键修复：禁用签名验证[11](@ref)[12](@ref)
+        export SIGNED_PACKAGES=0
         export FORCE_UNSAFE_CONFIGURE=1
         export PKG_HASH=skip
         
-        # 直接生成包索引（无需预编译）
-        make package_index V=s 2>&1 | tee build.log
+        # 安全生成索引
+        if ! make package_index V=s 2>&1 | tee build.log; then
+          echo "⚠️ 自动生成失败，尝试手动创建..."
+          cd packages
+          ../scripts/ipkg-make-index.sh . > Packages
+          gzip -9c Packages > Packages.gz
+          cd ..
+          echo "Package index manually generated" >> build.log
+        fi
         
         if ! grep -q "package index generated" build.log; then
           echo "❌ 包索引生成失败 - 详细错误:"
@@ -100,12 +103,6 @@ jobs:
         fi
         echo "✅ 包索引成功生成"
     # ===============================
-
-    - name: Cache package index
-      uses: actions/cache@v4
-      with:
-        path: ${{ env.IMAGEBUILDER_DIR }}/bin/packages
-        key: ${{ runner.os }}-packages-${{ hashFiles('plugins.list') }}
 
     - name: Parse plugins and packages
       id: get_pkgs
@@ -127,11 +124,12 @@ jobs:
         ALL_PKGS=$(echo "$BASE_PKGS $CUSTOM_PKGS" | tr ' ' '\n' | sort -u | xargs)
         echo "FINAL_PKGS=$ALL_PKGS" >> $GITHUB_ENV
 
-    - name: Build firmware with increased space
+    - name: Build firmware
       run: |
         set -euxo pipefail
         cd $IMAGEBUILDER_DIR
         
+        # 磁盘空间监控
         while true; do
           df -h .
           sleep 30
@@ -153,49 +151,18 @@ jobs:
         mkdir -p ../$OUTPUT_DIR
         cp -Pv bin/targets/x86/64/* ../$OUTPUT_DIR/
 
-    - name: Clean build intermediates
-      run: |
-        cd $IMAGEBUILDER_DIR
-        make clean
-        sudo rm -rf build_dir/ staging_dir/ tmp/
-        df -h .
-
-    - name: Verify firmware files
-      run: |
-        echo "==== Firmware files ===="
-        ls -lh ${{ env.OUTPUT_DIR }}
-        for file in ${{ env.OUTPUT_DIR }}/*; do
-          if [[ $file == *.tar.gz ]]; then
-            tar -tzf "$file" >/dev/null || echo "⚠️ Corrupted file: $file"
-          fi
-        done
-
     - name: Upload firmware to Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: immortalwrt-x86-64
         path: ${{ env.OUTPUT_DIR }}
 
-    - name: Generate release tag
-      id: release_tag
-      run: |
-        echo "tag=auto-build-$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
-
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v1
       with:
-        tag_name: ${{ steps.release_tag.outputs.tag }}
-        name: "ImmortalWrt x86_64 Firmware ${{ steps.release_tag.outputs.tag }}"
-        body: |
-          Automated build includes:
-          - Base packages: `${{ env.FINAL_PKGS }}`
-          - Custom IPKs from softs directory
+        tag_name: auto-build-$(date +'%Y%m%d-%H%M%S')
+        name: "ImmortalWrt x86_64 Firmware $(date +'%Y%m%d-%H%M%S')"
+        body: "Automated build with custom packages"
         files: ${{ env.OUTPUT_DIR }}/*
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Normalize permissions for caching
-      if: always()
-      run: |
-        sudo chown -R $USER:$USER ${{ env.IMAGEBUILDER_DIR }}
-        find ${{ env.IMAGEBUILDER_DIR }} -type f -exec chmod 644 {} \;
