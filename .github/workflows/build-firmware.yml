@@ -9,7 +9,7 @@ jobs:
     env:
       IMAGEBUILDER_URL: "https://downloads.immortalwrt.org/releases/24.10-SNAPSHOT/targets/x86/64/immortalwrt-imagebuilder-24.10-SNAPSHOT-x86-64.Linux-x86_64.tar.zst"
       IMAGEBUILDER_ARCHIVE: "immortalwrt-imagebuilder-24.10-SNAPSHOT-x86-64.Linux-x86_64.tar.zst"
-      IMAGEBUILDER_DIR: "immortalwrt-imagebuilder-24.10-SNAPSHOT-x86-64"
+      IMAGEBUILDER_DIR: "immortalwrt-imagebuilder-24.10-SNAPSHOT-x86-64.Linux-x86_64"
       SOFTS_DIR: "softs"
       PLUGINS_FILE: "plugins.list"
       OUTPUT_DIR: "output"
